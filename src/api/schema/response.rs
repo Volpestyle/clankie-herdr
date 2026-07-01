@@ -189,6 +189,9 @@ pub enum ResponseResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         file_frame_transport: Option<String>,
     },
+    PaneAttached {
+        pane_id: String,
+    },
     AgentExplain {
         explain: serde_json::Value,
     },

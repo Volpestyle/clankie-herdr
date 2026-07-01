@@ -2378,6 +2378,17 @@
           ],
           "type": "string"
         },
+        "PaneAttachParams": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "PaneClearAgentAuthorityParams": {
           "properties": {
             "pane_id": {
@@ -5533,6 +5544,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.attach",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneAttachParams"
             }
           },
           "required": [
@@ -9379,6 +9406,22 @@
                 "cell_width_px",
                 "cell_height_px",
                 "pane_visible"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane_attached",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id"
               ],
               "type": "object"
             },

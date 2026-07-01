@@ -1078,6 +1078,7 @@ impl HeadlessServer {
                 respond_to,
                 response_write_complete: None,
                 stream_active: None,
+                stream_to: None,
             },
             true,
         );
@@ -3665,6 +3666,23 @@ impl HeadlessServer {
             return true;
         }
 
+        if matches!(&msg.request.method, api::schema::Method::PaneAttach(_)) {
+            let api::ApiRequestMessage {
+                request,
+                respond_to,
+                stream_to,
+                ..
+            } = msg;
+            let response = match request.method {
+                api::schema::Method::PaneAttach(params) => {
+                    self.app.handle_pane_attach(request.id, params, stream_to)
+                }
+                _ => unreachable!("pane attach request was checked above"),
+            };
+            let _ = respond_to.send(response);
+            return false;
+        }
+
         match &msg.request.method {
             api::schema::Method::ClientWindowTitleSet(params) => {
                 let response = self.handle_client_window_title_api(
@@ -5546,6 +5564,7 @@ mod tests {
             respond_to,
             response_write_complete: None,
             stream_active: None,
+            stream_to: None,
         });
         let response: api::schema::SuccessResponse =
             serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
@@ -5604,6 +5623,7 @@ mod tests {
                 respond_to,
                 response_write_complete: None,
                 stream_active: None,
+                stream_to: None,
             })
         );
         let response = response_rx
@@ -11057,6 +11077,7 @@ next_tab = ""
             respond_to,
             response_write_complete: None,
             stream_active: None,
+            stream_to: None,
         });
 
         assert!(changed);
@@ -11144,6 +11165,7 @@ next_tab = ""
             respond_to,
             response_write_complete: None,
             stream_active: None,
+            stream_to: None,
         });
 
         assert!(changed);
@@ -11197,6 +11219,7 @@ next_tab = ""
             respond_to,
             response_write_complete: None,
             stream_active: None,
+            stream_to: None,
         });
 
         assert!(changed);
@@ -11230,6 +11253,7 @@ next_tab = ""
             respond_to,
             response_write_complete: None,
             stream_active: None,
+            stream_to: None,
         });
 
         assert!(changed);
@@ -11268,6 +11292,7 @@ next_tab = ""
                 respond_to,
                 response_write_complete: None,
                 stream_active: None,
+                stream_to: None,
             })
         );
 
@@ -11325,6 +11350,7 @@ next_tab = ""
                 respond_to,
                 response_write_complete: None,
                 stream_active: None,
+                stream_to: None,
             })
         );
 
@@ -11685,6 +11711,7 @@ next_tab = ""
             respond_to,
             response_write_complete: None,
             stream_active: None,
+            stream_to: None,
         });
 
         assert!(changed);

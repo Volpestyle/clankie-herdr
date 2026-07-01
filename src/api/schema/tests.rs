@@ -450,6 +450,22 @@ fn pane_read_defaults_to_text_format() {
 }
 
 #[test]
+fn pane_attach_request_round_trips() {
+    let request = Request {
+        id: "req_attach".into(),
+        method: Method::PaneAttach(PaneAttachParams {
+            pane_id: "w1-1".into(),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "pane.attach");
+    assert_eq!(json["params"]["pane_id"], "w1-1");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
 fn pane_current_request_round_trips() {
     let request = Request {
         id: "req_current".into(),

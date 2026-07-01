@@ -1134,6 +1134,16 @@ impl App {
             Method::PaneGraphicsStreamClose(params) => {
                 return self.handle_pane_graphics_stream_close(request.id, params);
             }
+            Method::PaneAttach(_) => {
+                let response = ErrorResponse {
+                    id: request.id,
+                    error: ErrorBody {
+                        code: "unsupported_unary_request".into(),
+                        message: "pane.attach must be handled as a stream request".into(),
+                    },
+                };
+                return serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+            }
             Method::PaneReportAgent(params) => {
                 return self.handle_pane_report_agent(request.id, params);
             }

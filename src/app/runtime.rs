@@ -75,6 +75,30 @@ impl App {
         );
         if matches!(
             &msg.request.method,
+            crate::api::schema::Method::PaneAttach(_)
+        ) {
+            let crate::api::ApiRequestMessage {
+                request,
+                respond_to,
+                stream_to,
+                ..
+            } = msg;
+            self.drain_all_internal_events();
+            let response = match request.method {
+                crate::api::schema::Method::PaneAttach(params) => {
+                    self.handle_pane_attach(request.id, params, stream_to)
+                }
+                _ => unreachable!("pane attach request was checked above"),
+            };
+            if !skip_default_workspace {
+                changed |= self.ensure_default_workspace();
+            }
+            let _ = respond_to.send(response);
+            self.sync_prefix_input_source(previous_mode);
+            return changed;
+        }
+        if matches!(
+            &msg.request.method,
             crate::api::schema::Method::WorktreeCreate(_)
                 | crate::api::schema::Method::WorktreeRemove(_)
         ) {

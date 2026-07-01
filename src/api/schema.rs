@@ -194,6 +194,8 @@ pub enum Method {
     #[serde(skip)]
     #[schemars(skip)]
     PaneGraphicsStreamClose(PaneGraphicsStreamParams),
+    #[serde(rename = "pane.attach")]
+    PaneAttach(PaneAttachParams),
     #[serde(rename = "pane.report_agent")]
     PaneReportAgent(PaneReportAgentParams),
     #[serde(rename = "pane.report_agent_session")]
