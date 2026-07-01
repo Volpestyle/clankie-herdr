@@ -1,8 +1,8 @@
 use bytes::Bytes;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCurrentParams,
-    PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
+    EventData, EventEnvelope, EventKind, PaneAttachParams, PaneClearAgentAuthorityParams,
+    PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
     PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneLayoutPane, PaneLayoutParams,
     PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams, PaneMoveDestination,
     PaneMoveParams, PaneMoveReason, PaneMoveResult, PaneNeighborParams, PaneNeighborResult,
@@ -16,6 +16,7 @@ use crate::api::schema::{
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::{App, Mode};
 use crate::layout::{find_in_direction, NavDirection, PaneId};
+use tracing::warn;
 
 use super::super::api_helpers::{
     detect_state_from_api, encode_api_keys, encode_api_text, normalize_custom_status,
@@ -1193,6 +1194,61 @@ impl App {
                     revision: 0,
                     truncated: false,
                 },
+            },
+        )
+    }
+
+    pub(crate) fn handle_pane_attach(
+        &mut self,
+        id: String,
+        params: PaneAttachParams,
+        stream_to: Option<std::sync::mpsc::Sender<crate::api::PaneOutputChunk>>,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some((runtime, _workspace_id)) = self.lookup_runtime(ws_idx, pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(stream_to) = stream_to else {
+            return encode_error(
+                id,
+                "invalid_attach",
+                "pane attach requires a stream channel",
+            );
+        };
+
+        let mut output_rx = runtime.subscribe_output();
+        tokio::spawn(async move {
+            loop {
+                match output_rx.recv().await {
+                    Ok(bytes) => {
+                        if stream_to
+                            .send(crate::api::PaneOutputChunk { bytes })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            pane = pane_id.raw(),
+                            skipped, "pane attach receiver lagged; closing byte stream"
+                        );
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        encode_success(
+            id,
+            ResponseResult::PaneAttached {
+                pane_id: public_pane_id,
             },
         )
     }

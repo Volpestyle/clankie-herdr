@@ -357,6 +357,10 @@ impl TerminalRuntime {
         self.0.send_paste(text).await
     }
 
+    pub fn subscribe_output(&self) -> tokio::sync::broadcast::Receiver<Bytes> {
+        self.0.subscribe_output()
+    }
+
     pub fn try_send_focus_event(&self, event: crate::ghostty::FocusEvent) -> bool {
         self.0.try_send_focus_event(event)
     }

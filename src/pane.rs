@@ -13,7 +13,7 @@ use portable_pty::{native_pty_system, PtySize};
 use ratatui::{layout::Rect, Frame};
 #[cfg(test)]
 use tokio::sync::watch;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{broadcast, mpsc, Notify};
 #[cfg(not(windows))]
 use tracing::debug;
 use tracing::{error, info, warn};
@@ -49,6 +49,7 @@ pub use self::{
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
 const PANE_TERM: &str = "xterm-256color";
 const PANE_COLORTERM: &str = "truecolor";
+const PANE_OUTPUT_BROADCAST_CAPACITY: usize = 4096;
 
 fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     // Each pane is rendered by herdr's own terminal layer, not the outer terminal
@@ -925,6 +926,7 @@ pub struct PaneRuntime {
     pane_id: PaneId,
     terminal: Arc<PaneTerminal>,
     io: PaneRuntimeIo,
+    output_tx: broadcast::Sender<Bytes>,
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
@@ -1522,6 +1524,10 @@ impl PaneRuntime {
         self.terminal.apply_host_terminal_theme(theme);
     }
 
+    pub fn subscribe_output(&self) -> broadcast::Receiver<Bytes> {
+        self.output_tx.subscribe()
+    }
+
     pub fn spawn(
         pane_id: PaneId,
         rows: u16,
@@ -1725,9 +1731,11 @@ impl PaneRuntime {
         let reported_cwd = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let (output_tx, _output_rx) = broadcast::channel(PANE_OUTPUT_BROADCAST_CAPACITY);
 
         let io = {
             let terminal = terminal.clone();
+            let output_tx = output_tx.clone();
             let response_writer = response_tx.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
@@ -1738,6 +1746,7 @@ impl PaneRuntime {
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
+                let _ = output_tx.send(Bytes::copy_from_slice(bytes));
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
@@ -1799,6 +1808,7 @@ impl PaneRuntime {
             pane_id,
             terminal,
             io,
+            output_tx,
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
             child_pid,
             reported_cwd,
@@ -1849,6 +1859,7 @@ impl PaneRuntime {
         }
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
+        let (output_tx, _output_rx) = broadcast::channel(PANE_OUTPUT_BROADCAST_CAPACITY);
 
         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
             .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
@@ -1887,6 +1898,7 @@ impl PaneRuntime {
 
         let io = {
             let terminal = terminal.clone();
+            let output_tx = output_tx.clone();
             let response_writer = response_tx.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
@@ -1896,6 +1908,7 @@ impl PaneRuntime {
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
+                let _ = output_tx.send(Bytes::copy_from_slice(bytes));
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
@@ -2307,6 +2320,7 @@ impl PaneRuntime {
             pane_id,
             terminal,
             io,
+            output_tx,
             current_size: Cell::new((rows, cols, 0, 0)),
             child_pid,
             reported_cwd,
@@ -2702,6 +2716,7 @@ impl PaneRuntime {
     ) -> (Self, mpsc::Receiver<Bytes>) {
         let (tx, rx) = mpsc::channel(channel_capacity);
         let (resize_tx, _resize_rx) = watch::channel((rows, cols, 0, 0));
+        let (output_tx, _output_rx) = broadcast::channel(PANE_OUTPUT_BROADCAST_CAPACITY);
         let mut terminal =
             crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();
         terminal.write(bytes);
@@ -2716,6 +2731,7 @@ impl PaneRuntime {
                     sender: tx,
                     resize_tx,
                 },
+                output_tx,
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
@@ -3203,6 +3219,7 @@ mod tests {
     async fn focus_events_are_forwarded_when_enabled() {
         let (tx, mut rx) = mpsc::channel(4);
         let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
+        let (output_tx, _output_rx) = broadcast::channel(PANE_OUTPUT_BROADCAST_CAPACITY);
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal
             .mode_set(crate::ghostty::MODE_FOCUS_EVENT, true)
@@ -3216,6 +3233,7 @@ mod tests {
                 sender: tx,
                 resize_tx,
             },
+            output_tx,
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
@@ -3237,6 +3255,7 @@ mod tests {
     async fn focus_events_are_suppressed_when_disabled() {
         let (tx, mut rx) = mpsc::channel(4);
         let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
+        let (output_tx, _output_rx) = broadcast::channel(PANE_OUTPUT_BROADCAST_CAPACITY);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let runtime = PaneRuntime {
             pane_id: PaneId::from_raw(0),
@@ -3247,6 +3266,7 @@ mod tests {
                 sender: tx,
                 resize_tx,
             },
+            output_tx,
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),

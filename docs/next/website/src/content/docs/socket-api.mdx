@@ -103,7 +103,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.attach`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
@@ -646,6 +646,30 @@ herdr pane read w1:p1 --source detection
 
 `recent-unwrapped` is useful for logs because it ignores soft wrapping.
 `detection` returns the bottom-buffer snapshot used by agent screen detection.
+
+Use `pane.attach` when a protocol client needs live terminal bytes without
+polling `pane.read`:
+
+```json
+{"id":"attach_1","method":"pane.attach","params":{"pane_id":"w1:p1"}}
+```
+
+The first line acknowledges the stream:
+
+```json
+{"id":"attach_1","result":{"type":"pane_attached","pane_id":"w1:p1"}}
+```
+
+Later lines are pushed byte chunks:
+
+```json
+{"id":"attach_1","stream":true,"chunk":{"pane_id":"w1:p1","seq":1,"encoding":"base64","data":"SGVsbG8K"}}
+```
+
+`data` is base64-encoded raw PTY output. `seq` is monotonic per attachment.
+If the client falls far enough behind that chunks are dropped, Herdr closes the
+stream so the client can reattach and recover from a fresh `pane.read`
+snapshot.
 
 ## Waiting for state
 

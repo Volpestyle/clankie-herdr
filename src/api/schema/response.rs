@@ -152,6 +152,9 @@ pub enum ResponseResult {
     PaneRead {
         read: PaneReadResult,
     },
+    PaneAttached {
+        pane_id: String,
+    },
     AgentExplain {
         explain: serde_json::Value,
     },

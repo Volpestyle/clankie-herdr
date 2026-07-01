@@ -12,6 +12,7 @@ pub use status::{read_runtime_status_at, RuntimeStatus};
 
 use std::path::PathBuf;
 
+use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use crate::api::schema::{Method, Request};
@@ -66,6 +67,22 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
 pub struct ApiRequestMessage {
     pub request: Request,
     pub respond_to: std::sync::mpsc::Sender<String>,
+    pub stream_to: Option<std::sync::mpsc::Sender<PaneOutputChunk>>,
+}
+
+impl ApiRequestMessage {
+    pub fn unary(request: Request, respond_to: std::sync::mpsc::Sender<String>) -> Self {
+        Self {
+            request,
+            respond_to,
+            stream_to: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneOutputChunk {
+    pub bytes: Bytes,
 }
 
 pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;

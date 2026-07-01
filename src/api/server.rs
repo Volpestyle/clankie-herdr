@@ -1,9 +1,11 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc as std_mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use tracing::{debug, error, info, warn};
 
@@ -11,7 +13,9 @@ use tracing::{debug, error, info, warn};
 use std::fs;
 
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, Request, ResponseResult, ServerCapabilities, SuccessResponse,
+    ErrorBody, ErrorResponse, Method, PaneAttachChunk, PaneAttachChunkEnvelope,
+    PaneAttachEncoding, PaneAttachParams, Request, ResponseResult, ServerCapabilities,
+    SuccessResponse,
 };
 use crate::api::subscriptions::ActiveSubscription;
 use crate::api::wait::{wait_for_event, wait_for_output};
@@ -229,6 +233,21 @@ fn handle_connection(
             }
             result
         }
+        Method::PaneAttach(params) => {
+            let result = stream_pane_attach(stream, request_id.clone(), params, api_tx, running);
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "stream_closed",
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
+        }
         Method::PaneWaitForOutput(params) => {
             let Some(response) =
                 wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?
@@ -363,6 +382,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneSendKeys(_) => "pane.send_keys",
         Method::PaneSendInput(_) => "pane.send_input",
         Method::PaneRead(_) => "pane.read",
+        Method::PaneAttach(_) => "pane.attach",
         Method::PaneReportAgent(_) => "pane.report_agent",
         Method::PaneReportAgentSession(_) => "pane.report_agent_session",
         Method::PaneReportMetadata(_) => "pane.report_metadata",
@@ -508,6 +528,96 @@ fn stream_subscriptions(
     }
 }
 
+fn stream_pane_attach(
+    mut stream: LocalStream,
+    request_id: String,
+    params: PaneAttachParams,
+    api_tx: &ApiRequestSender,
+    running: &Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    let pane_id = params.pane_id.clone();
+    let (respond_to, response_rx) = std_mpsc::channel();
+    let (stream_tx, stream_rx) = std_mpsc::channel();
+
+    if let Err(err) = api_tx.send(ApiRequestMessage {
+        request: Request {
+            id: request_id.clone(),
+            method: Method::PaneAttach(params),
+        },
+        respond_to,
+        stream_to: Some(stream_tx),
+    }) {
+        write_text_line_allow_disconnect(
+            &mut stream,
+            &error_response_json(
+                request_id,
+                "server_unavailable",
+                format!("failed to dispatch attach request: {err}"),
+            ),
+        )?;
+        return Ok(());
+    }
+
+    let response = match response_rx.recv_timeout(APP_RESPONSE_TIMEOUT) {
+        Ok(response) => response,
+        Err(std_mpsc::RecvTimeoutError::Timeout) => error_response_json(
+            request_id.clone(),
+            "server_unavailable",
+            format!(
+                "timed out waiting for pane attach after {} ms",
+                APP_RESPONSE_TIMEOUT.as_millis()
+            ),
+        ),
+        Err(std_mpsc::RecvTimeoutError::Disconnected) => error_response_json(
+            request_id.clone(),
+            "server_unavailable",
+            "pane attach response channel closed".to_string(),
+        ),
+    };
+    write_text_line_allow_disconnect(&mut stream, &response)?;
+    if response_is_error(&response) {
+        return Ok(());
+    }
+
+    let mut seq = 0_u64;
+    loop {
+        if should_stop_connection(&mut stream, running)? {
+            return Ok(());
+        }
+
+        match stream_rx.recv_timeout(CONNECTION_POLL_INTERVAL) {
+            Ok(chunk) => {
+                seq = seq.saturating_add(1);
+                let envelope = PaneAttachChunkEnvelope {
+                    id: request_id.clone(),
+                    stream: true,
+                    chunk: PaneAttachChunk {
+                        pane_id: pane_id.clone(),
+                        seq,
+                        encoding: PaneAttachEncoding::Base64,
+                        data: base64::engine::general_purpose::STANDARD
+                            .encode(chunk.bytes.as_ref()),
+                    },
+                };
+                if let Err(err) = write_json_line(&mut stream, &envelope) {
+                    if is_connection_closed_error(&err) {
+                        return Ok(());
+                    }
+                    return Err(err);
+                }
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+fn response_is_error(response: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(response)
+        .ok()
+        .is_some_and(|value| value.get("error").is_some())
+}
+
 fn write_text_line(stream: &mut LocalStream, value: &str) -> std::io::Result<()> {
     stream.write_all(value.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -561,10 +671,7 @@ pub(super) fn dispatch_to_app_with_timeout(
 ) -> String {
     let request_id = request.id.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
-    if let Err(err) = api_tx.send(ApiRequestMessage {
-        request,
-        respond_to,
-    }) {
+    if let Err(err) = api_tx.send(ApiRequestMessage::unary(request, respond_to)) {
         return error_response_json(
             request_id,
             "server_unavailable",
@@ -811,6 +918,68 @@ mod tests {
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_1");
         assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
+    }
+
+    #[test]
+    fn pane_attach_streams_base64_chunks() {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let responder = std::thread::spawn(move || {
+            let msg = api_rx.blocking_recv().unwrap();
+            assert!(matches!(msg.request.method, Method::PaneAttach(_)));
+            let stream_to = msg.stream_to.unwrap();
+            msg.respond_to
+                .send(
+                    serde_json::to_string(&SuccessResponse {
+                        id: msg.request.id,
+                        result: ResponseResult::PaneAttached {
+                            pane_id: "pane_1".into(),
+                        },
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            stream_to
+                .send(crate::api::PaneOutputChunk {
+                    bytes: bytes::Bytes::from_static(b"hi"),
+                })
+                .unwrap();
+        });
+
+        let (mut client, server, _path) = local_stream_pair("api-pane-attach");
+        client
+            .write_all(br#"{"id":"req_attach","method":"pane.attach","params":{"pane_id":"pane_1"}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let server_thread = std::thread::spawn(move || {
+            handle_connection(server, &api_tx, &event_hub, &server_running, None)
+        });
+
+        let mut reader = BufReader::new(client);
+        let mut ack = String::new();
+        reader.read_line(&mut ack).unwrap();
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack["result"]["type"], "pane_attached");
+        assert_eq!(ack["result"]["pane_id"], "pane_1");
+
+        let mut chunk = String::new();
+        reader.read_line(&mut chunk).unwrap();
+        let chunk: serde_json::Value = serde_json::from_str(&chunk).unwrap();
+        assert_eq!(chunk["id"], "req_attach");
+        assert_eq!(chunk["stream"], true);
+        assert_eq!(chunk["chunk"]["pane_id"], "pane_1");
+        assert_eq!(chunk["chunk"]["seq"], 1);
+        assert_eq!(chunk["chunk"]["encoding"], "base64");
+        assert_eq!(chunk["chunk"]["data"], "aGk=");
+
+        running.store(false, Ordering::Relaxed);
+        drop(reader);
+        server_thread.join().unwrap().unwrap();
+        responder.join().unwrap();
     }
 
     #[test]

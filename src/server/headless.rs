@@ -750,6 +750,7 @@ impl HeadlessServer {
                     method,
                 },
                 respond_to,
+                stream_to: None,
             },
             true,
         );
@@ -2798,6 +2799,22 @@ impl HeadlessServer {
             return true;
         }
 
+        if matches!(&msg.request.method, api::schema::Method::PaneAttach(_)) {
+            let api::ApiRequestMessage {
+                request,
+                respond_to,
+                stream_to,
+            } = msg;
+            let response = match request.method {
+                api::schema::Method::PaneAttach(params) => {
+                    self.app.handle_pane_attach(request.id, params, stream_to)
+                }
+                _ => unreachable!("pane attach request was checked above"),
+            };
+            let _ = respond_to.send(response);
+            return false;
+        }
+
         match &msg.request.method {
             api::schema::Method::ClientWindowTitleSet(params) => {
                 let response = self.handle_client_window_title_api(
@@ -4260,6 +4277,7 @@ mod tests {
                     method: api::schema::Method::ServerStop(api::schema::EmptyParams::default()),
                 },
                 respond_to,
+                stream_to: None,
             })
         );
         let response = response_rx
@@ -7912,6 +7930,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            stream_to: None,
         });
 
         assert!(changed);
@@ -7997,6 +8016,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            stream_to: None,
         });
 
         assert!(changed);
@@ -8048,6 +8068,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            stream_to: None,
         });
 
         assert!(changed);
@@ -8079,6 +8100,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            stream_to: None,
         });
 
         assert!(changed);
@@ -8115,6 +8137,7 @@ next_tab = ""
                     ),
                 },
                 respond_to,
+                stream_to: None,
             })
         );
 
@@ -8170,6 +8193,7 @@ next_tab = ""
                     ),
                 },
                 respond_to,
+                stream_to: None,
             })
         );
 
@@ -8442,6 +8466,7 @@ next_tab = ""
                 }),
             },
             respond_to,
+            stream_to: None,
         });
 
         assert!(changed);
