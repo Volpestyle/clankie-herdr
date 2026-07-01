@@ -240,6 +240,28 @@ fn usable_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
     crate::platform::process_cwd(pid).filter(|cwd| cwd.is_absolute() && cwd.is_dir())
 }
 
+/// Choose which working directory represents the pane's foreground program.
+///
+/// A readable foreground process-group *leader* cwd is authoritative: it is the
+/// working directory of the program the pane is actually running. The
+/// `member_cwd_fallback` is consulted only when the leader's cwd cannot be read.
+///
+/// The fallback must stay a fallback. A foreground program often spawns
+/// long-lived auxiliary subprocesses that run from their own directory — for
+/// example an MCP server launched from its install dir under
+/// `~/Library/Application Support`. Those subprocesses share the foreground
+/// process group, so treating a differing member cwd as the pane cwd whenever
+/// the leader merely agrees with the shell would report the server's install
+/// dir instead of where the agent is working. Preferring the leader keeps
+/// `foreground_cwd` pointed at the program, not at the servers it spawns.
+#[cfg(unix)]
+fn select_foreground_cwd(
+    leader_cwd: Option<std::path::PathBuf>,
+    member_cwd_fallback: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    leader_cwd.or_else(member_cwd_fallback)
+}
+
 #[cfg(unix)]
 fn foreground_member_cwd_different_from_shell(
     shell_pid: u32,
@@ -2620,19 +2642,16 @@ impl PaneRuntime {
         #[cfg(unix)]
         {
             let pid = self.child_pid.load(Ordering::Acquire);
-            let shell_cwd = usable_process_cwd(pid);
             let foreground_pgid = self
                 .io
                 .foreground_process_group_id()
                 .or_else(|| crate::platform::foreground_process_group_id(pid));
             let leader_cwd = foreground_pgid.and_then(usable_process_cwd);
 
-            if leader_cwd.as_ref() == shell_cwd.as_ref() {
-                foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()).or(leader_cwd)
-            } else {
-                leader_cwd
-                    .or_else(|| foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()))
-            }
+            select_foreground_cwd(leader_cwd, || {
+                let shell_cwd = usable_process_cwd(pid);
+                foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref())
+            })
         }
 
         #[cfg(not(unix))]
@@ -2736,6 +2755,48 @@ mod tests {
     #[test]
     fn shutdown_liveness_treats_missing_process_as_gone() {
         assert!(!process_alive_for_shutdown(43, 42, false, |_| false));
+    }
+
+    // A foreground program (an agent) shares its process group with auxiliary
+    // subprocesses it spawns, such as an MCP server running from its install
+    // dir. The leader cwd is authoritative; a differing member cwd must not
+    // override it, and the member fallback must not even run when the leader
+    // cwd is known.
+    #[cfg(unix)]
+    #[test]
+    fn select_foreground_cwd_prefers_leader_over_spawned_member() {
+        use std::cell::Cell;
+        use std::path::PathBuf;
+
+        let fallback_called = Cell::new(false);
+        let chosen = select_foreground_cwd(Some(PathBuf::from("/Users/x/dev/app")), || {
+            fallback_called.set(true);
+            Some(PathBuf::from(
+                "/Users/x/Library/Application Support/some-mcp",
+            ))
+        });
+
+        assert_eq!(chosen, Some(PathBuf::from("/Users/x/dev/app")));
+        assert!(
+            !fallback_called.get(),
+            "member fallback must not run when the leader cwd is known"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn select_foreground_cwd_falls_back_to_member_when_leader_unknown() {
+        use std::path::PathBuf;
+
+        let chosen = select_foreground_cwd(None, || Some(PathBuf::from("/Users/x/dev/sub")));
+        assert_eq!(chosen, Some(PathBuf::from("/Users/x/dev/sub")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn select_foreground_cwd_is_none_when_leader_and_member_unknown() {
+        let chosen = select_foreground_cwd(None, || None);
+        assert_eq!(chosen, None);
     }
 
     #[cfg(unix)]
