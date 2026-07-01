@@ -31,6 +31,8 @@ const SOCKET_PERMISSION_MODE: u32 = 0o600;
 pub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Poll interval on the initial request's latency-critical read path.
+const INITIAL_REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_INITIAL_REQUEST_BYTES: usize = 1024 * 1024;
 
@@ -564,7 +566,7 @@ fn read_initial_request_line_with_limits(
                         "timed out reading api request",
                     ));
                 }
-                std::thread::sleep(CONNECTION_POLL_INTERVAL);
+                std::thread::sleep(INITIAL_REQUEST_POLL_INTERVAL);
             }
         }
     };
@@ -1186,6 +1188,34 @@ mod tests {
         let generic_error =
             r#"{"id":"req","error":{"code":"server_unavailable","message":"boom"}}"#;
         assert_eq!(api_response_outcome(generic_error), "error");
+    }
+
+    #[test]
+    fn initial_request_line_reads_split_writes_promptly() {
+        let (mut client, mut server, _path) = local_stream_pair("api-initial-split");
+        let writer = std::thread::spawn(move || {
+            client.write_all(br#"{"id":"req_split","#).unwrap();
+            client.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            client
+                .write_all(b"\"method\":\"ping\",\"params\":{}}\n")
+                .unwrap();
+            client.flush().unwrap();
+            client
+        });
+
+        let started = Instant::now();
+        let line = read_initial_request_line(&mut server)
+            .expect("read initial request line")
+            .expect("request line present");
+        let elapsed = started.elapsed();
+
+        assert!(line.ends_with('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(parsed["id"], "req_split");
+        assert!(elapsed < Duration::from_millis(90), "took {elapsed:?}");
+
+        let _client = writer.join().unwrap();
     }
 
     #[test]
