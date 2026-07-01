@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc as std_mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,9 +13,8 @@ use tracing::{debug, error, info, warn};
 use std::fs;
 
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, PaneAttachChunk, PaneAttachChunkEnvelope,
-    PaneAttachEncoding, PaneAttachParams, Request, ResponseResult, ServerCapabilities,
-    SuccessResponse,
+    ErrorBody, ErrorResponse, Method, PaneAttachChunk, PaneAttachChunkEnvelope, PaneAttachEncoding,
+    PaneAttachParams, Request, ResponseResult, ServerCapabilities, SuccessResponse,
 };
 use crate::api::subscriptions::ActiveSubscription;
 use crate::api::wait::{wait_for_event, wait_for_output};
@@ -29,6 +28,10 @@ const SOCKET_PERMISSION_MODE: u32 = 0o600;
 pub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Poll interval for the initial-request fallback path on transports without
+/// receive timeouts. Kept far below `CONNECTION_POLL_INTERVAL` because this
+/// sleep sits directly on every API request's latency path.
+const INITIAL_REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_INITIAL_REQUEST_BYTES: usize = 1024 * 1024;
 
@@ -425,6 +428,77 @@ fn api_response_outcome(response: &str) -> &'static str {
 }
 
 fn read_initial_request_line(stream: &mut LocalStream) -> std::io::Result<Option<String>> {
+    // Event-driven blocking read with a receive-timeout deadline. The previous
+    // nonblocking loop slept `CONNECTION_POLL_INTERVAL` (100ms) on every
+    // `WouldBlock`, so any request whose bytes arrived just after a failed
+    // read attempt paid up to ~100ms before being parsed — a dominant latency
+    // tail for request-per-keystroke consumers.
+    match stream.set_recv_timeout(Some(INITIAL_REQUEST_TIMEOUT)) {
+        Ok(()) => {
+            let result = read_initial_request_line_blocking(stream);
+            stream.set_recv_timeout(None)?;
+            result
+        }
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            debug!(err = %err, "api connection receive timeout unavailable; polling");
+            read_initial_request_line_polling(stream)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn read_initial_request_line_blocking(stream: &mut LocalStream) -> std::io::Result<Option<String>> {
+    let deadline = Instant::now() + INITIAL_REQUEST_TIMEOUT;
+    let mut bytes = Vec::new();
+    let mut byte = [0u8; 1];
+
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => return Ok(None),
+            Ok(_) => {
+                bytes.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return String::from_utf8(bytes)
+                        .map(Some)
+                        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
+                }
+                if bytes.len() > MAX_INITIAL_REQUEST_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "api request line is too large",
+                    ));
+                }
+                // The receive timeout restarts on every successful read; keep
+                // the total time a trickling client can hold the handshake
+                // bounded by the overall deadline.
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "timed out reading api request",
+                    ));
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out reading api request",
+                ));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Fallback for transports without receive timeouts (Windows named pipes):
+/// the nonblocking poll loop, with a short poll interval so the worst-case
+/// added latency stays small.
+fn read_initial_request_line_polling(stream: &mut LocalStream) -> std::io::Result<Option<String>> {
     stream.set_nonblocking(true)?;
     let deadline = Instant::now() + INITIAL_REQUEST_TIMEOUT;
     let mut bytes = Vec::new();
@@ -460,7 +534,7 @@ fn read_initial_request_line(stream: &mut LocalStream) -> std::io::Result<Option
                         "timed out reading api request",
                     ));
                 }
-                std::thread::sleep(CONNECTION_POLL_INTERVAL);
+                std::thread::sleep(INITIAL_REQUEST_POLL_INTERVAL);
             }
             Err(err) => {
                 stream.set_nonblocking(false)?;
@@ -901,6 +975,37 @@ mod tests {
     }
 
     #[test]
+    fn initial_request_line_reads_split_writes_promptly() {
+        let (mut client, mut server, _path) = local_stream_pair("api-initial-split");
+        let writer = std::thread::spawn(move || {
+            client.write_all(br#"{"id":"req_split","#).unwrap();
+            client.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            client
+                .write_all(b"\"method\":\"ping\",\"params\":{}}\n")
+                .unwrap();
+            client.flush().unwrap();
+            client
+        });
+
+        let started = Instant::now();
+        let line = read_initial_request_line(&mut server)
+            .expect("read initial request line")
+            .expect("request line present");
+        let elapsed = started.elapsed();
+
+        assert!(line.ends_with('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(parsed["id"], "req_split");
+        // The blocking read must wake as soon as the final chunk lands. The
+        // old nonblocking poll loop slept 100ms per WouldBlock, which would
+        // put this read at >= 100ms.
+        assert!(elapsed < Duration::from_millis(90), "took {elapsed:?}");
+
+        let _client = writer.join().unwrap();
+    }
+
+    #[test]
     fn ping_request_returns_pong() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let response = handle_request(
@@ -947,7 +1052,9 @@ mod tests {
 
         let (mut client, server, _path) = local_stream_pair("api-pane-attach");
         client
-            .write_all(br#"{"id":"req_attach","method":"pane.attach","params":{"pane_id":"pane_1"}}"#)
+            .write_all(
+                br#"{"id":"req_attach","method":"pane.attach","params":{"pane_id":"pane_1"}}"#,
+            )
             .unwrap();
         client.write_all(b"\n").unwrap();
         client.flush().unwrap();
