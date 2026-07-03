@@ -530,13 +530,20 @@ impl HeadlessServer {
                 }
                 let rendered_retained =
                     pty_dirty && !needs_full_render && self.render_retained_pty_update_and_stream();
-                if !rendered_retained {
+                // `render_and_stream` services queued client API requests between
+                // per-client render targets so input is not head-of-line blocked
+                // behind a full multi-client render pass (VUH-420). If one of those
+                // requests changed UI state mid-pass, keep the render flags set so
+                // the next iteration re-renders every client from the settled state.
+                let rerender_after_api_drain = if !rendered_retained {
                     crate::render_prof::event("full_render.invoke");
-                    self.render_and_stream();
-                }
+                    self.render_and_stream()
+                } else {
+                    false
+                };
                 self.app.last_render_at = Some(now);
-                needs_render = false;
-                needs_full_render = false;
+                needs_render = rerender_after_api_drain;
+                needs_full_render = rerender_after_api_drain;
                 continue;
             }
 
@@ -2741,6 +2748,47 @@ impl HeadlessServer {
         changed
     }
 
+    /// Drains and handles queued client API requests between per-client render
+    /// targets so input is never head-of-line blocked behind a full multi-client
+    /// render pass (VUH-420).
+    ///
+    /// Each handled request responds to its client immediately, so keystrokes and
+    /// control requests (e.g. `tab.focus`) unblock without waiting for the render
+    /// to finish. A request that changes UI state takes effect in server state at
+    /// once; the returned `bool` tells the render loop to re-render on the next
+    /// iteration so every client converges on the settled state (any cross-client
+    /// inconsistency lasts at most one frame).
+    ///
+    /// `ServerLiveHandoff` is the one request that must run at a main-loop
+    /// boundary — it disconnects every client, pauses PTY readers, and re-execs
+    /// the process — so it is re-queued rather than run mid-render.
+    fn drain_api_requests_between_render_targets(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(msg) = self.app.api_rx.try_recv() {
+            #[cfg(unix)]
+            {
+                if matches!(
+                    msg.request.method,
+                    api::schema::Method::ServerLiveHandoff(_)
+                ) {
+                    if let Some(api_tx) = self.api_tx.clone() {
+                        // Re-queue for the main-loop boundary and stop servicing
+                        // the queue for this pass. If the channel is closed the
+                        // server is already tearing down and the request is moot.
+                        let _ = api_tx.send(msg);
+                        break;
+                    }
+                    // No sender to defer through (e.g. tests): handle inline
+                    // rather than dropping the request.
+                    changed |= self.handle_api_request_with_shutdown_check(msg);
+                    continue;
+                }
+            }
+            changed |= self.handle_api_request_with_shutdown_check(msg);
+        }
+        changed
+    }
+
     /// Handles a single API request with shutdown awareness.
     ///
     /// Also forwards any toast/sound notifications that result from the API
@@ -3385,7 +3433,11 @@ impl HeadlessServer {
         }
     }
 
-    fn render_and_stream(&mut self) {
+    /// Renders each attached client and streams the resulting frames, servicing
+    /// queued client API requests between render targets (VUH-420). Returns
+    /// `true` when a mid-render API request changed UI state and the caller
+    /// should re-render on the next loop iteration.
+    fn render_and_stream(&mut self) -> bool {
         let full_started = crate::render_prof::timer();
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
 
@@ -3408,12 +3460,24 @@ impl HeadlessServer {
                 cols,
                 rows, resize_panes, "rendered virtual frame with no attached clients"
             );
-            return;
+            return false;
         }
 
         let mut broken_clients: Vec<u64> = Vec::new();
         let mut deferred_frame = false;
-        for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
+        let mut rerender_requested = false;
+        for (idx, (client_id, (cols, rows), cell_size, is_foreground, mode)) in
+            render_targets.into_iter().enumerate()
+        {
+            // Between per-client render targets, service any client API requests
+            // that queued while the previous target was rendering so input never
+            // waits for the whole multi-client pass to finish (VUH-420). Requests
+            // are answered immediately; a UI-changing one flags a re-render so the
+            // next loop iteration converges all clients on the settled state.
+            if idx != 0 {
+                rerender_requested |= self.drain_api_requests_between_render_targets();
+            }
+
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut frame = match mode {
@@ -3665,6 +3729,7 @@ impl HeadlessServer {
         }
         crate::render_prof::duration_since("full_render.total", full_started);
         debug!(cols, rows, foreground_client_id = ?self.foreground_client_id, "rendered virtual frame(s)");
+        rerender_requested
     }
 
     /// Handle scheduled tasks for the headless server.
@@ -6740,6 +6805,131 @@ next_tab = ""
 
         assert_eq!((desktop_frame.width, desktop_frame.height), (120, 40));
         assert_eq!((phone_frame.width, phone_frame.height), (80, 24));
+    }
+
+    // VUH-420: a client API request queued while a multi-client render pass is in
+    // progress must be answered between per-client render targets, not stalled
+    // behind the whole pass. With two clients the interleave drain runs once —
+    // after the first target renders and before the second — so the queued
+    // request is answered mid-pass.
+    #[test]
+    fn render_and_stream_answers_api_request_between_render_targets() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+
+        let (desktop_tx, _desktop_control_rx, desktop_rx) = test_client_writer();
+        let (phone_tx, _phone_control_rx, phone_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(desktop_tx),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(phone_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        // Install an API channel we control and enqueue a UI-changing request
+        // before the render pass starts. The baseline render loop never touches
+        // the API queue, so without the interleave drain this request would go
+        // unanswered by `render_and_stream`.
+        let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        server.app.api_rx = api_rx;
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        api_tx
+            .send(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "focus".into(),
+                    method: api::schema::Method::TabFocus(api::schema::TabTarget {
+                        tab_id: "tab-1".into(),
+                    }),
+                },
+                respond_to,
+                stream_to: None,
+            })
+            .expect("enqueue api request");
+
+        let rerender = server.render_and_stream();
+
+        // The queued request was answered during the render pass (between the two
+        // per-client render targets), so its blocking API thread unblocks without
+        // waiting for the full pass.
+        response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("api request answered during render pass");
+        // A UI-changing request handled mid-pass asks the caller to re-render so
+        // all clients converge on the settled state next iteration.
+        assert!(rerender);
+        // Both clients were still rendered by the same pass.
+        let desktop_frame = read_server_frame(desktop_rx.recv().expect("desktop frame"));
+        let phone_frame = read_server_frame(phone_rx.recv().expect("phone frame"));
+        assert_eq!((desktop_frame.width, desktop_frame.height), (120, 40));
+        assert_eq!((phone_frame.width, phone_frame.height), (80, 24));
+    }
+
+    // VUH-420: live handoff disconnects every client, pauses PTY readers, and
+    // re-execs, so the interleave drain must re-queue it for the main-loop
+    // boundary instead of running it mid-render.
+    #[cfg(unix)]
+    #[test]
+    fn drain_between_render_targets_defers_live_handoff() {
+        let mut server = test_headless_server();
+        let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        server.app.api_rx = api_rx;
+        server.api_tx = Some(api_tx.clone());
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        api_tx
+            .send(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "handoff".into(),
+                    method: api::schema::Method::ServerLiveHandoff(
+                        api::schema::ServerLiveHandoffParams::default(),
+                    ),
+                },
+                respond_to,
+                stream_to: None,
+            })
+            .expect("enqueue handoff request");
+
+        let changed = server.drain_api_requests_between_render_targets();
+
+        // Nothing was handled mid-render, and the handoff was not executed.
+        assert!(!changed);
+        assert!(!server.handoff_in_progress);
+        assert!(response_rx.try_recv().is_err());
+        // The handoff is re-queued for the main loop to handle at a safe boundary.
+        let requeued = server
+            .app
+            .api_rx
+            .try_recv()
+            .expect("handoff re-queued for main loop");
+        assert!(matches!(
+            requeued.request.method,
+            api::schema::Method::ServerLiveHandoff(_)
+        ));
     }
 
     #[tokio::test]
