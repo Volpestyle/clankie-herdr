@@ -113,23 +113,23 @@ fn rect_fits_frame(rect: Rect, frame: &FrameData) -> bool {
 fn apply_terminal_dirty_patch(
     frame: &mut FrameData,
     area: Rect,
-    patch: crate::pane::TerminalDirtyPatch,
+    patch: &crate::pane::TerminalDirtyPatch,
 ) -> bool {
     if !rect_fits_frame(area, frame) {
         return false;
     }
     let width = usize::from(frame.width);
-    for (local_y, row_cells) in patch.rows {
-        if local_y >= area.height || row_cells.len() != usize::from(area.width) {
+    for (local_y, row_cells) in &patch.rows {
+        if *local_y >= area.height || row_cells.len() != usize::from(area.width) {
             return false;
         }
-        let frame_y = area.y + local_y;
+        let frame_y = area.y + *local_y;
         let start = usize::from(frame_y) * width + usize::from(area.x);
         let end = start + usize::from(area.width);
         if end > frame.cells.len() {
             return false;
         }
-        frame.cells[start..end].clone_from_slice(&row_cells);
+        frame.cells[start..end].clone_from_slice(row_cells);
     }
     true
 }
@@ -3125,43 +3125,32 @@ impl HeadlessServer {
         }
 
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
-        let [(client_id, (cols, rows), cell_size, _is_foreground, mode)] =
-            render_targets.as_slice()
-        else {
-            retained_fallback!("multiple_or_no_target");
-        };
-        if !matches!(mode, ClientConnectionMode::App) {
+        if render_targets.is_empty() {
+            retained_fallback!("no_target");
+        }
+
+        // The retained fast path only streams full-app clients. Terminal
+        // attach/observe targets render their own terminal through the full
+        // render path, so any non-app target sends everyone through it.
+        if !render_targets
+            .iter()
+            .all(|(_, _, _, _, mode)| matches!(mode, ClientConnectionMode::App))
+        {
             retained_fallback!("not_app_client");
         }
-        let Some(client) = self.clients.get(client_id) else {
-            retained_fallback!("client_missing");
-        };
-        if client.render_pending {
-            retained_fallback!("render_pending");
-        }
-        if self.app.state.kitty_graphics_enabled && !client.graphics_cache.is_empty() {
-            retained_fallback!("graphics_cache_active");
-        }
-        if client.graphics_surface_reset_pending {
-            retained_fallback!("graphics_surface_reset");
-        }
-        if self.app.state.kitty_graphics_enabled
-            && cell_size.is_known()
-            && crate::kitty_graphics::has_visible_pane_graphics(
-                &self.app.state,
-                &self.app.terminal_runtimes,
-                *cell_size,
-            )
+
+        // All served clients reuse one shared pane layout (`app.state.view`) and
+        // one destructive per-runtime dirty collection, so they must share the
+        // same frame geometry. `effective_size` is the foreground client's size
+        // and drives that layout; differently sized clients fall back to the full
+        // render path (which resizes/re-renders per client).
+        let (ref_cols, ref_rows) = self.effective_size;
+        if render_targets
+            .iter()
+            .any(|(_, size, _, _, _)| *size != (ref_cols, ref_rows))
         {
-            retained_fallback!("visible_kitty_graphics");
+            retained_fallback!("client_size_divergence");
         }
-        let Some(mut frame) = client.render_state.last_frame().cloned() else {
-            retained_fallback!("no_last_frame");
-        };
-        if frame.width != *cols || frame.height != *rows {
-            retained_fallback!("frame_size_mismatch");
-        }
-        frame.graphics.clear();
 
         let Some(ws_idx) = self.app.state.active else {
             retained_fallback!("no_active_workspace");
@@ -3171,9 +3160,58 @@ impl HeadlessServer {
             retained_fallback!("no_pane_info");
         }
 
-        let mut touched = false;
-        for info in pane_infos {
-            if !rect_fits_frame(info.inner_rect, &frame) {
+        // Per-client prerequisites, checked before the destructive dirty
+        // collection so common bail-outs don't clear damage needlessly. Every
+        // client must already hold a baseline frame of the shared geometry and
+        // have no pending render slot or host-graphics state the retained path
+        // can't service. A client that can't join incrementally (e.g. one that
+        // just attached and has no baseline) sends everyone to the full render
+        // path for this frame; it gains a baseline there and rejoins next frame.
+        for (client_id, _, cell_size, _, _) in &render_targets {
+            let Some(client) = self.clients.get(client_id) else {
+                retained_fallback!("client_missing");
+            };
+            // A client whose render slot was full missed the previous frame, so
+            // its baseline is stale by a patch. Falling back forces it (and the
+            // others) through a full render that re-syncs its baseline; on drain
+            // the same guard keeps it on the full path until it catches up.
+            if client.render_pending {
+                retained_fallback!("render_pending");
+            }
+            if self.app.state.kitty_graphics_enabled && !client.graphics_cache.is_empty() {
+                retained_fallback!("graphics_cache_active");
+            }
+            if client.graphics_surface_reset_pending {
+                retained_fallback!("graphics_surface_reset");
+            }
+            match client.render_state.last_frame() {
+                Some(frame) if frame.width == ref_cols && frame.height == ref_rows => {}
+                Some(_) => retained_fallback!("frame_size_mismatch"),
+                None => retained_fallback!("no_last_frame"),
+            }
+            if self.app.state.kitty_graphics_enabled
+                && cell_size.is_known()
+                && crate::kitty_graphics::has_visible_pane_graphics(
+                    &self.app.state,
+                    &self.app.terminal_runtimes,
+                    *cell_size,
+                )
+            {
+                retained_fallback!("visible_kitty_graphics");
+            }
+        }
+
+        // Collect per-pane damage exactly once. `collect_dirty_patch` clears the
+        // runtime's dirty rows as a side effect, so it must run a single time per
+        // frame and then be fanned out to every client's baseline. A `Fallback`
+        // means the full render path must run; clearing dirty first is harmless
+        // because the full render re-reads the whole grid regardless of dirty
+        // state (and re-clears it via `ghostty_clear_render_dirty`).
+        let mut pane_patches: Vec<(Rect, crate::pane::TerminalDirtyPatch)> = Vec::new();
+        for info in &pane_infos {
+            if info.inner_rect.x.saturating_add(info.inner_rect.width) > ref_cols
+                || info.inner_rect.y.saturating_add(info.inner_rect.height) > ref_rows
+            {
                 retained_fallback!("pane_rect_outside_frame");
             }
             let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
@@ -3193,36 +3231,71 @@ impl HeadlessServer {
                 crate::pane::TerminalDirtyPatchOutcome::Patch(patch) => {
                     crate::render_prof::event("retained.pane_patch");
                     crate::render_prof::counter("retained.patch_rows", patch.rows.len() as u64);
-                    if dirty_patch_intersects_hyperlinks(&frame, info.inner_rect, &patch) {
-                        retained_fallback!("hyperlink_intersection");
-                    }
-                    if !apply_terminal_dirty_patch(&mut frame, info.inner_rect, patch) {
-                        retained_fallback!("patch_apply_failed");
-                    }
-                    touched = true;
+                    pane_patches.push((info.inner_rect, patch));
                 }
             }
         }
 
-        let previous_cursor = frame.cursor.clone();
-        frame.cursor = crate::server::render_stream::focused_terminal_cursor(
+        let touched = !pane_patches.is_empty();
+
+        // The cursor is derived from shared app state and the shared geometry, so
+        // it is identical for every same-sized client; compute it once.
+        let new_cursor = crate::server::render_stream::focused_terminal_cursor(
             &self.app.state,
             &self.app.terminal_runtimes,
         );
-        let cursor_changed = frame.cursor != previous_cursor;
 
-        if !touched && !cursor_changed {
-            retained_success!("clean_no_cursor_change");
+        // Fan the shared damage out to each client's own retained baseline and
+        // stream the patched frame. Each client keeps its own baseline/encoder in
+        // `render_state`, so cross-frame de-dup and terminal-ANSI diffing stay
+        // per client.
+        let mut broken_clients = Vec::new();
+        let mut all_served = true;
+        for (client_id, _, _, _, _) in &render_targets {
+            let client_id = *client_id;
+            let next_frame = {
+                let Some(client) = self.clients.get(&client_id) else {
+                    retained_fallback!("client_missing");
+                };
+                let Some(mut frame) = client.render_state.last_frame().cloned() else {
+                    retained_fallback!("no_last_frame");
+                };
+                frame.graphics.clear();
+                for (rect, patch) in &pane_patches {
+                    if dirty_patch_intersects_hyperlinks(&frame, *rect, patch) {
+                        retained_fallback!("hyperlink_intersection");
+                    }
+                    if !apply_terminal_dirty_patch(&mut frame, *rect, patch) {
+                        retained_fallback!("patch_apply_failed");
+                    }
+                }
+                let previous_cursor = frame.cursor.clone();
+                frame.cursor = new_cursor.clone();
+                let cursor_changed = frame.cursor != previous_cursor;
+                if !touched && !cursor_changed {
+                    crate::render_prof::event("retained.client_clean_no_cursor_change");
+                    None
+                } else {
+                    Some(frame)
+                }
+            };
+            if let Some(frame) = next_frame {
+                if !self.send_retained_frame_to_client(client_id, frame, &mut broken_clients) {
+                    all_served = false;
+                }
+            }
         }
 
-        let mut broken_clients = Vec::new();
-        let sent = self.send_retained_frame_to_client(*client_id, frame, &mut broken_clients);
         for broken_client in broken_clients {
             self.remove_client_and_resize_if_needed(broken_client);
         }
-        if sent {
+
+        if all_served {
             retained_success!("sent");
         }
+        // At least one client's render slot filled mid-fan-out; it stays
+        // `render_pending` and a full render runs now to retry it (served clients
+        // dedup as identical). It re-syncs on the next dirty frame or on drain.
         retained_fallback!("send_failed");
     }
 
@@ -4407,6 +4480,33 @@ mod tests {
         server.resize_shared_runtime_to_effective_size();
 
         (server, client_rx, pane_id)
+    }
+
+    /// A retained-path server with two equally sized full-app clients attached
+    /// (client 1 is foreground). Returns the render receivers for each client.
+    fn retained_test_server_two_clients(
+        initial_screen: &[u8],
+    ) -> (
+        HeadlessServer,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        crate::layout::PaneId,
+    ) {
+        let (mut server, client_rx, pane_id) = retained_test_server(initial_screen);
+        let (second_tx, _second_control_rx, second_rx) = test_client_writer();
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(second_tx),
+            ),
+        );
+        (server, client_rx, second_rx, pane_id)
     }
 
     fn assert_frame_data_eq(actual: &FrameData, expected: &FrameData) {
@@ -7230,6 +7330,216 @@ next_tab = ""
         );
         assert!(patched.cells.iter().any(|cell| cell.symbol == "Z"));
         assert_eq!((patched.width, patched.height), (80, 24));
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_streams_dirty_row_to_all_clients() {
+        let (mut server, first_rx, second_rx, pane_id) = retained_test_server_two_clients(b"aaaa");
+
+        // Establish a baseline frame for both clients.
+        server.render_and_stream();
+        let first_initial = read_server_frame(
+            first_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("first initial frame"),
+        );
+        let second_initial = read_server_frame(
+            second_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("second initial frame"),
+        );
+        assert!(first_initial.cells.iter().any(|cell| cell.symbol == "a"));
+        assert!(second_initial.cells.iter().any(|cell| cell.symbol == "a"));
+
+        // Dirty a single row.
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+
+        // The retained path serves both clients incrementally: it returns true, so
+        // no full re-render happens, and both clients receive the patched row.
+        assert!(server.render_retained_pty_update_and_stream());
+
+        let first_patched = read_server_frame(
+            first_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("first retained frame"),
+        );
+        let second_patched = read_server_frame(
+            second_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("second retained frame"),
+        );
+        assert!(first_patched.cells.iter().any(|cell| cell.symbol == "Z"));
+        assert!(second_patched.cells.iter().any(|cell| cell.symbol == "Z"));
+        assert_eq!((first_patched.width, first_patched.height), (80, 24));
+        assert_eq!((second_patched.width, second_patched.height), (80, 24));
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_full_renders_for_late_client_then_rejoins() {
+        let (mut server, first_rx, pane_id) = retained_test_server(b"aaaa");
+
+        // Client 1 gets a baseline and a retained update while it is the only client.
+        server.render_and_stream();
+        let _ = first_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("first baseline");
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+        assert!(server.render_retained_pty_update_and_stream());
+        let _ = first_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("first retained frame");
+
+        // A second client attaches mid-stream with no baseline of its own.
+        let (second_tx, _second_control_rx, second_rx) = test_client_writer();
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(second_tx),
+            ),
+        );
+
+        // Dirty again. The baseline-less client can't join the retained path, so it
+        // falls back to a full render for everyone this frame.
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rY");
+        assert!(!server.render_retained_pty_update_and_stream());
+        server.render_and_stream();
+        let first_full = read_server_frame(
+            first_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("first full frame"),
+        );
+        let second_full = read_server_frame(
+            second_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("second full frame (baseline)"),
+        );
+        assert!(first_full.cells.iter().any(|cell| cell.symbol == "Y"));
+        assert!(second_full.cells.iter().any(|cell| cell.symbol == "Y"));
+
+        // With both clients now holding a baseline, the next dirty update rejoins
+        // the retained fast path and serves both incrementally.
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rX");
+        assert!(server.render_retained_pty_update_and_stream());
+        let first_join = read_server_frame(
+            first_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("first rejoined frame"),
+        );
+        let second_join = read_server_frame(
+            second_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("second rejoined frame"),
+        );
+        assert!(first_join.cells.iter().any(|cell| cell.symbol == "X"));
+        assert!(second_join.cells.iter().any(|cell| cell.symbol == "X"));
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_falls_back_when_one_client_missed_a_frame() {
+        let (mut server, first_rx, second_rx, pane_id) = retained_test_server_two_clients(b"aaaa");
+
+        server.render_and_stream();
+        let _ = first_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("first baseline");
+        let _ = second_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second baseline");
+
+        // Simulate client 2 having missed the previous frame (its render slot was
+        // full), leaving its retained baseline stale by one patch.
+        server
+            .clients
+            .get_mut(&2)
+            .expect("second client")
+            .render_pending = true;
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+
+        // A render-pending client forces the whole frame onto the full render path
+        // so its stale baseline can re-sync; no retained frame is streamed.
+        assert!(!server.render_retained_pty_update_and_stream());
+        assert!(first_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(second_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        // Once the writer drains and the full render runs, both baselines re-sync.
+        assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 2 }));
+        server.render_and_stream();
+        let first_resync = read_server_frame(
+            first_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("first resync frame"),
+        );
+        let second_resync = read_server_frame(
+            second_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("second resync frame"),
+        );
+        assert!(first_resync.cells.iter().any(|cell| cell.symbol == "Z"));
+        assert!(second_resync.cells.iter().any(|cell| cell.symbol == "Z"));
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_falls_back_when_client_sizes_diverge() {
+        let (mut server, first_rx, second_rx, pane_id) = retained_test_server_two_clients(b"aaaa");
+        // Give the background client a different terminal size than the foreground.
+        server
+            .clients
+            .get_mut(&2)
+            .expect("second client")
+            .terminal_size = (100, 30);
+
+        server.render_and_stream();
+        let _ = first_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("first baseline");
+        let _ = second_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second baseline");
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+
+        // The shared layout only matches the foreground size, so divergent client
+        // sizes send everyone through the full render path.
+        assert!(!server.render_retained_pty_update_and_stream());
+        assert!(first_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(second_rx.recv_timeout(Duration::from_millis(50)).is_err());
     }
 
     #[tokio::test]
