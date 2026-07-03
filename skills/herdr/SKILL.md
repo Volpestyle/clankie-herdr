@@ -73,6 +73,10 @@ Herdr injects the caller's context into each managed pane:
 printf '%s\n' "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID"
 ```
 
+`HERDR_SOCKET_PATH` takes precedence over `HERDR_SESSION`. To target another
+session from inside a managed pane, clear both socket overrides:
+`env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH HERDR_SESSION=<name> herdr ...`.
+
 Prefer `--current` when a pane command should target the calling pane. Omitting a target may use the UI-focused pane, which can belong to the user or another client.
 
 Discover live state with:
