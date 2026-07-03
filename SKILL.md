@@ -43,6 +43,10 @@ plain shells still exist as panes, but herdr's sidebar agent section intentional
 
 important: ids can compact when tabs, panes, or workspaces are closed. do not treat them as durable ids. re-read ids from `workspace list`, `tab list`, `pane list`, or create/split responses when you need a current id. do not guess that an older `1-3` is still the same pane later.
 
+cleanup authority is ownership-scoped. only close panes, tabs, workspaces, or
+agents that you created in the current task, or that the user explicitly told
+you to close. an idle or done sibling pane is not yours to clean up.
+
 ## discover yourself
 
 see what panes exist and which one is focused:
@@ -222,6 +226,10 @@ herdr workspace close 2
 
 ## close a pane
 
+only use this for a pane you created, or for a pane the user explicitly asked
+you to close. re-read live ids first and confirm the pane is still the one you
+mean.
+
 ```bash
 herdr pane close 1-3
 ```
@@ -298,3 +306,4 @@ herdr pane read 1-1 --source recent --lines 100
 - without `--label`, workspace create keeps cwd-based naming and tab create keeps numbered naming.
 - `--label` on tab create and workspace create applies the custom name immediately.
 - if you are running inside herdr, the `HERDR_ENV` environment variable is set to `1`.
+- session targeting from inside a pane: `HERDR_SOCKET_PATH` (set in every pane's env) overrides `HERDR_SESSION`, so `HERDR_SESSION=<name> herdr ...` silently targets your OWN session instead. To address another session from inside herdr, clear the overrides: `env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH HERDR_SESSION=<name> herdr ...`.
