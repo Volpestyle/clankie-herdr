@@ -1144,6 +1144,13 @@ impl Terminal {
         Ok(rows)
     }
 
+    pub fn viewport_cell(&self, x: u16, y: u32) -> Result<(CellWide, Vec<u32>), Error> {
+        let grid_ref = self.grid_ref(ghostty_viewport_point(x, y))?;
+        let wide = grid_ref_wide(&grid_ref)?;
+        let graphemes = grid_ref_graphemes(&grid_ref)?;
+        Ok((wide, graphemes))
+    }
+
     fn viewport_graphemes_and_style(&self, x: u16, y: u32) -> Result<(Vec<u32>, CellStyle), Error> {
         let grid_ref = self.grid_ref(ghostty_viewport_point(x, y))?;
         let graphemes = grid_ref_graphemes(&grid_ref)?;

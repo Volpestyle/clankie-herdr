@@ -10448,6 +10448,69 @@ next_tab = ""
     }
 
     #[tokio::test]
+    async fn retained_pty_update_survives_visible_read_between_frames() {
+        let initial = b"spin -";
+        let update = b"\rspin /";
+        let (mut retained_server, first_rx, second_rx, retained_pane_id) =
+            retained_test_server_two_clients(initial);
+        let (mut full_server, full_rx, full_pane_id) = retained_test_server(initial);
+
+        retained_server.render_and_stream();
+        let _ = first_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("first initial frame");
+        let _ = second_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second initial frame");
+        full_server.render_and_stream();
+        let _ = full_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("full initial frame");
+
+        let retained_runtime = retained_server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(
+                &retained_server.app.terminal_runtimes,
+                0,
+                retained_pane_id,
+            )
+            .expect("retained runtime");
+        retained_runtime.test_process_pty_bytes(update);
+        assert!(
+            retained_runtime.visible_text().contains("spin /"),
+            "visible read should see the spinner update"
+        );
+        full_server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&full_server.app.terminal_runtimes, 0, full_pane_id)
+            .expect("full runtime")
+            .test_process_pty_bytes(update);
+
+        assert!(retained_server.render_retained_pty_update_and_stream());
+        full_server.render_and_stream();
+
+        let first_patched = read_server_frame(
+            first_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("first retained frame"),
+        );
+        let second_patched = read_server_frame(
+            second_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("second retained frame"),
+        );
+        let full_frame = read_server_frame(
+            full_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("full frame"),
+        );
+        assert_frame_data_eq(&first_patched, &full_frame);
+        assert_frame_data_eq(&second_patched, &full_frame);
+    }
+
+    #[tokio::test]
     async fn retained_pty_update_full_renders_for_late_client_then_rejoins() {
         let (mut server, first_rx, pane_id) = retained_test_server(b"aaaa");
 
