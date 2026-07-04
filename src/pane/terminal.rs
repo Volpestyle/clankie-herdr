@@ -121,6 +121,8 @@ pub(crate) struct GhosttyPaneTerminal {
 pub(crate) struct GhosttyPaneCore {
     pub terminal: crate::ghostty::Terminal,
     pub render_state: crate::ghostty::RenderState,
+    output_revision: u64,
+    clean_render_output_revision: u64,
     pub kitty_keyboard: KittyKeyboardTracker,
     pub initial_default_foreground: Option<crate::ghostty::RgbColor>,
     pub initial_default_background: Option<crate::ghostty::RgbColor>,
@@ -380,6 +382,8 @@ impl GhosttyPaneTerminal {
             core: Mutex::new(GhosttyPaneCore {
                 terminal,
                 render_state,
+                output_revision: 0,
+                clean_render_output_revision: 0,
                 kitty_keyboard: KittyKeyboardTracker::default(),
                 initial_default_foreground,
                 initial_default_background,
@@ -654,7 +658,9 @@ impl GhosttyPaneTerminal {
         for event in events {
             let end_offset = event.end_offset().min(bytes.len());
             if end_offset > written {
-                core.terminal.write(&bytes[written..end_offset]);
+                let chunk = &bytes[written..end_offset];
+                core.terminal.write(chunk);
+                mark_terminal_output_changed_for_bytes(core, chunk);
                 terminal_responses.extend(self.drain_pending_pty_responses());
                 written = end_offset;
             }
@@ -669,7 +675,9 @@ impl GhosttyPaneTerminal {
         }
 
         if written < bytes.len() {
-            core.terminal.write(&bytes[written..]);
+            let chunk = &bytes[written..];
+            core.terminal.write(chunk);
+            mark_terminal_output_changed_for_bytes(core, chunk);
             terminal_responses.extend(self.drain_pending_pty_responses());
         }
 
@@ -693,6 +701,7 @@ impl GhosttyPaneTerminal {
             return;
         };
         core.terminal.write(ansi.as_bytes());
+        mark_terminal_output_changed_for_bytes(&mut core, ansi.as_bytes());
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
         }
@@ -706,6 +715,7 @@ impl GhosttyPaneTerminal {
 
         if input_state.alternate_screen {
             core.terminal.write(b"\x1b[?1049h");
+            mark_terminal_output_changed(&mut core);
         }
         let _ = core.terminal.mode_set(
             crate::ghostty::MODE_APPLICATION_CURSOR_KEYS,
@@ -762,7 +772,9 @@ impl GhosttyPaneTerminal {
         }
 
         if input_state.modify_other_keys {
-            core.terminal.write(b"\x1b[>4;2m");
+            let bytes = b"\x1b[>4;2m";
+            core.terminal.write(bytes);
+            mark_terminal_output_changed_for_bytes(&mut core, bytes);
         }
 
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
@@ -788,6 +800,7 @@ impl GhosttyPaneTerminal {
         };
         core.kitty_keyboard.observe(ansi.as_bytes());
         core.terminal.write(ansi.as_bytes());
+        mark_terminal_output_changed_for_bytes(&mut core, ansi.as_bytes());
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
         }
@@ -831,6 +844,7 @@ impl GhosttyPaneTerminal {
             let _ = core
                 .terminal
                 .resize(cols, rows, cell_width_px, cell_height_px);
+            mark_terminal_output_changed(&mut core);
             let terminal_responses = self.drain_pending_pty_responses();
 
             let bottom_is_blank = ghostty_detection_text(&core)
@@ -846,7 +860,7 @@ impl GhosttyPaneTerminal {
             if offset_from_bottom > 0 {
                 let mut remaining = offset_from_bottom.min(resize_recovery_probe_lines);
                 while remaining > 0
-                    && ghostty_visible_text(&mut core)
+                    && ghostty_visible_text(&core)
                         .map(|text| text.trim().is_empty())
                         .unwrap_or(false)
                 {
@@ -1108,7 +1122,7 @@ impl GhosttyPaneTerminal {
         self.core
             .lock()
             .ok()
-            .and_then(|mut core| ghostty_visible_text(&mut core).ok())
+            .and_then(|core| ghostty_visible_text(&core).ok())
             .unwrap_or_default()
     }
 
@@ -1204,6 +1218,8 @@ impl GhosttyPaneTerminal {
             terminal,
             render_state,
             decscusr_tracker,
+            output_revision,
+            clean_render_output_revision,
             ..
         } = &mut *core;
         if render_state.update(terminal).is_err() {
@@ -1288,6 +1304,7 @@ impl GhosttyPaneTerminal {
         }
 
         ghostty_clear_render_dirty(render_state, area.height);
+        *clean_render_output_revision = *output_revision;
 
         let current_cursor = cursor_state_from_render_state(render_state, decscusr_tracker);
         if show_cursor {
@@ -1364,6 +1381,7 @@ fn render_delay_after_pty_write(
 }
 
 fn current_cursor_state(core: &mut GhosttyPaneCore) -> Option<TerminalCursorState> {
+    record_out_of_loop_render_state_update("render_state_update.out_of_loop.cursor_state");
     let GhosttyPaneCore {
         terminal,
         render_state,
@@ -1395,6 +1413,84 @@ fn cursor_state_from_render_state(
         visible: render_state.cursor_visible().ok()?,
         shape,
     })
+}
+
+fn mark_terminal_output_changed(core: &mut GhosttyPaneCore) {
+    core.output_revision = core.output_revision.wrapping_add(1);
+}
+
+fn mark_terminal_output_changed_for_bytes(core: &mut GhosttyPaneCore, bytes: &[u8]) {
+    if terminal_bytes_may_change_visible_cells(bytes) {
+        mark_terminal_output_changed(core);
+    }
+}
+
+fn terminal_bytes_may_change_visible_cells(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            0x1b => {
+                let Some(next) = bytes.get(index + 1).copied() else {
+                    return false;
+                };
+                match next {
+                    b'[' => {
+                        let params_start = index + 2;
+                        let Some(final_index) = bytes[params_start..]
+                            .iter()
+                            .position(|byte| (0x40..=0x7e).contains(byte))
+                            .map(|offset| params_start + offset)
+                        else {
+                            return false;
+                        };
+                        let final_byte = bytes[final_index];
+                        let params = &bytes[params_start..final_index];
+                        if matches!(
+                            final_byte,
+                            b'@' | b'J' | b'K' | b'L' | b'M' | b'P' | b'S' | b'T' | b'X'
+                        ) || matches!(final_byte, b'h' | b'l')
+                            && (params.windows(4).any(|window| window == b"1049")
+                                || params.windows(4).any(|window| window == b"1047")
+                                || params.windows(2).any(|window| window == b"47"))
+                        {
+                            return true;
+                        }
+                        index = final_index + 1;
+                    }
+                    b']' | b'_' | b'^' | b'P' => {
+                        let mut cursor = index + 2;
+                        while cursor < bytes.len() {
+                            if bytes[cursor] == 0x07 {
+                                cursor += 1;
+                                break;
+                            }
+                            if bytes[cursor] == 0x1b && bytes.get(cursor + 1) == Some(&b'\\') {
+                                cursor += 2;
+                                break;
+                            }
+                            cursor += 1;
+                        }
+                        index = cursor;
+                    }
+                    b'c' => return true,
+                    _ => {
+                        index += 2;
+                    }
+                }
+            }
+            b'\n' | 0x0b | 0x0c => return true,
+            0x20..=0x7e | 0x80..=0xff => return true,
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    false
+}
+
+fn record_out_of_loop_render_state_update(reason: &'static str) {
+    crate::render_prof::event("render_state_update.out_of_loop");
+    crate::render_prof::event(reason);
 }
 
 type VisibleHyperlinks = Vec<((u16, u16), String, String)>;
@@ -1456,12 +1552,25 @@ fn ghostty_collect_dirty_patch(
     let GhosttyPaneCore {
         terminal,
         render_state,
+        output_revision,
+        clean_render_output_revision,
         ..
     } = core;
+    let current_output_revision = *output_revision;
+    let previous_clean_output_revision = *clean_render_output_revision;
     if render_state.update(terminal).is_err() {
         fallback!("render_state_update_error");
     }
     match render_state.dirty() {
+        Ok(crate::ghostty::Dirty::Clean)
+            if current_output_revision != previous_clean_output_revision =>
+        {
+            crate::render_prof::counter(
+                "dirty_collect.clean_output_revision_gap",
+                current_output_revision.wrapping_sub(previous_clean_output_revision),
+            );
+            fallback!("clean_after_untracked_update");
+        }
         Ok(crate::ghostty::Dirty::Clean) => finish!(TerminalDirtyPatchOutcome::Clean),
         Ok(crate::ghostty::Dirty::Partial) => {}
         Ok(crate::ghostty::Dirty::Full) => fallback!("dirty_full"),
@@ -1564,6 +1673,7 @@ fn ghostty_collect_dirty_patch(
     {
         fallback!("set_clean_error");
     }
+    *clean_render_output_revision = current_output_revision;
 
     finish!(TerminalDirtyPatchOutcome::Patch(TerminalDirtyPatch {
         rows: patch_rows
@@ -1574,6 +1684,7 @@ fn ghostty_visible_hyperlinks(
     core: &mut GhosttyPaneCore,
     area: Rect,
 ) -> Result<VisibleHyperlinks, crate::ghostty::Error> {
+    record_out_of_loop_render_state_update("render_state_update.out_of_loop.visible_hyperlinks");
     let GhosttyPaneCore {
         terminal,
         render_state,
@@ -1601,20 +1712,16 @@ fn ghostty_visible_hyperlinks(
     Ok(links)
 }
 
-fn ghostty_visible_text(core: &mut GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
-    let GhosttyPaneCore {
-        terminal,
-        render_state,
-        ..
-    } = core;
-    render_state.update(terminal)?;
-    let mut row_iterator = crate::ghostty::RowIterator::new()?;
-    let mut row_cells = crate::ghostty::RowCells::new()?;
-    let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
-    let mut lines = Vec::new();
-    while rows.next() {
-        let mut cells = rows.populate_cells(&mut row_cells)?;
-        lines.push(ghostty_line_from_cells(&mut cells)?);
+fn ghostty_visible_text(core: &GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
+    let rows = core.terminal.rows()?;
+    let cols = core.terminal.cols()?;
+    if rows == 0 || cols == 0 {
+        return Ok(String::new());
+    }
+
+    let mut lines = Vec::with_capacity(usize::from(rows));
+    for y in 0..u32::from(rows) {
+        lines.push(ghostty_viewport_row(core, cols, y)?);
     }
     trim_trailing_blank_rows(&mut lines);
     Ok(lines_to_text(lines))
@@ -1790,32 +1897,39 @@ fn ghostty_screen_row(
     let mut line = String::new();
     for x in 0..cols {
         let (wide, graphemes) = core.terminal.screen_cell(x, y)?;
-        if wide == crate::ghostty::CellWide::SpacerTail {
-            continue;
-        }
-        if graphemes.is_empty()
-            || graphemes.first().copied() == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER)
-        {
-            line.push(' ');
-        } else {
-            for codepoint in graphemes {
-                if let Some(ch) = char::from_u32(codepoint) {
-                    line.push(ch);
-                }
-            }
-        }
+        push_plain_cell(&mut line, wide, graphemes);
     }
     Ok(line.trim_end().to_string())
 }
 
-fn ghostty_line_from_cells(
-    cells: &mut crate::ghostty::RowCellIter<'_>,
+fn ghostty_viewport_row(
+    core: &GhosttyPaneCore,
+    cols: u16,
+    y: u32,
 ) -> Result<String, crate::ghostty::Error> {
     let mut line = String::new();
-    while cells.next() {
-        line.push_str(&ghostty_cell_symbol(cells)?);
+    for x in 0..cols {
+        let (wide, graphemes) = core.terminal.viewport_cell(x, y)?;
+        push_plain_cell(&mut line, wide, graphemes);
     }
     Ok(line.trim_end().to_string())
+}
+
+fn push_plain_cell(line: &mut String, wide: crate::ghostty::CellWide, graphemes: Vec<u32>) {
+    if wide == crate::ghostty::CellWide::SpacerTail {
+        return;
+    }
+    if graphemes.is_empty()
+        || graphemes.first().copied() == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER)
+    {
+        line.push(' ');
+    } else {
+        for codepoint in graphemes {
+            if let Some(ch) = char::from_u32(codepoint) {
+                line.push(ch);
+            }
+        }
+    }
 }
 
 fn ghostty_cell_symbol(
@@ -2100,6 +2214,7 @@ fn cursor_color_query_color(core: &mut GhosttyPaneCore) -> Option<crate::ghostty
 }
 
 fn palette_color_query_response(index: u8, core: &mut GhosttyPaneCore) -> Option<Bytes> {
+    record_out_of_loop_render_state_update("render_state_update.out_of_loop.palette_query");
     let GhosttyPaneCore {
         terminal,
         render_state,
@@ -3916,6 +4031,37 @@ mod tests {
             crate::protocol::underline_style_from_modifier(cell.modifier),
             3
         );
+    }
+
+    #[test]
+    fn visible_text_does_not_consume_dirty_patch_damage() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut frame_terminal = ratatui::Terminal::new(backend).unwrap();
+        frame_terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let result = pane.process_pty_bytes(PaneId::from_raw(1), 0, b"spin /", &tx);
+        assert!(result.request_render);
+        assert_eq!(pane.visible_text(), "spin /\n");
+
+        let patch = match pane.collect_dirty_patch(20, 5) {
+            TerminalDirtyPatchOutcome::Patch(patch) => patch,
+            other => panic!("expected dirty patch after visible read, got {other:?}"),
+        };
+        assert!(patch.rows[0].1.iter().any(|cell| cell.symbol == "/"));
+    }
+
+    #[test]
+    fn terminal_damage_candidate_classifier_ignores_cursor_only_csi() {
+        assert!(!terminal_bytes_may_change_visible_cells(b"\x1b[D"));
+        assert!(!terminal_bytes_may_change_visible_cells(b"\x1b[2;3H"));
+        assert!(terminal_bytes_may_change_visible_cells(b"\rspin /"));
+        assert!(terminal_bytes_may_change_visible_cells(b"\x1b[2J"));
+        assert!(terminal_bytes_may_change_visible_cells(b"\x1b[?1049h"));
     }
 
     #[test]
