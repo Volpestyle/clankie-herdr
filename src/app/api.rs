@@ -1802,6 +1802,7 @@ mod tests {
             agent: "codex".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session")
                 .expect("test session id should be valid"),
+            report: None,
         });
 
         app.handle_internal_event(AppEvent::PaneDied { pane_id });

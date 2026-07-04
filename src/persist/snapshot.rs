@@ -1112,6 +1112,7 @@ mod tests {
                 source: "herdr:opencode".into(),
                 agent: "opencode".into(),
                 session_ref: crate::agent_resume::AgentSessionRef::id("opencode-session").unwrap(),
+                report: None,
             });
 
         let snapshot = capture_from_state(&state);

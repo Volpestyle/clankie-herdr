@@ -855,6 +855,8 @@ mod tests {
             custom_status: None,
             state_labels: HashMap::new(),
             agent_session: None,
+            agent_session_id: None,
+            agent_session_path: None,
             revision: 0,
         }
     }

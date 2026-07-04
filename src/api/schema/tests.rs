@@ -588,6 +588,8 @@ fn worktree_request_and_response_round_trip() {
                 custom_status: None,
                 state_labels: HashMap::new(),
                 agent_session: None,
+                agent_session_id: None,
+                agent_session_path: None,
                 revision: 0,
             },
             worktree: WorktreeInfo {
@@ -990,6 +992,8 @@ fn create_response_round_trips_with_root_pane() {
                 custom_status: None,
                 state_labels: HashMap::new(),
                 agent_session: None,
+                agent_session_id: None,
+                agent_session_path: None,
                 revision: 0,
             },
         },

@@ -5593,6 +5593,7 @@ next_tab = ""
                 custom_status: None,
                 seq: None,
                 session_ref: None,
+                session_report: None,
             })
         );
         assert!(
