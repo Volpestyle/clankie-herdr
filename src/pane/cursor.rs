@@ -8,7 +8,9 @@ const CURSOR_POSITION_MAX_HOLD: Duration = Duration::from_millis(100);
 #[derive(Debug, Default)]
 pub(crate) struct DecscusrTracker {
     state: DecscusrParseState,
-    cursor_shape_overridden: bool,
+    /// Last DECSCUSR shape parameter observed (1-6); 0 when the child never
+    /// set a shape or reset it back to the terminal default (`CSI 0 SP q`).
+    cursor_shape: u8,
 }
 
 #[derive(Debug, Default)]
@@ -38,6 +40,10 @@ impl DecscusrTracker {
                 }
             }
             DecscusrParseState::Escape => {
+                if byte == b'c' {
+                    // RIS resets the cursor style back to the terminal default.
+                    self.cursor_shape = 0;
+                }
                 self.state = if byte == b'[' {
                     DecscusrParseState::Csi {
                         first_param: None,
@@ -69,7 +75,7 @@ impl DecscusrTracker {
                     if byte == b'q' && *has_space_intermediate {
                         let param = first_param.unwrap_or(0);
                         if param <= 6 {
-                            self.cursor_shape_overridden = param != 0;
+                            self.cursor_shape = param as u8;
                         }
                     }
                     self.state = DecscusrParseState::Ground;
@@ -80,8 +86,10 @@ impl DecscusrTracker {
         }
     }
 
-    pub(crate) fn cursor_shape_overridden(&self) -> bool {
-        self.cursor_shape_overridden
+    /// DECSCUSR shape to report for the cursor: the raw parameter (1-6), or 0
+    /// when the terminal default applies.
+    pub(crate) fn cursor_shape(&self) -> u8 {
+        self.cursor_shape
     }
 }
 

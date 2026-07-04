@@ -67,19 +67,6 @@ pub(crate) enum TerminalDirtyPatchOutcome {
     Fallback,
 }
 
-fn decscusr_cursor_shape(style: crate::ghostty::CursorVisualStyle, blinking: bool) -> u8 {
-    match (style, blinking) {
-        (crate::ghostty::CursorVisualStyle::Block, true)
-        | (crate::ghostty::CursorVisualStyle::BlockHollow, true) => 1,
-        (crate::ghostty::CursorVisualStyle::Block, false)
-        | (crate::ghostty::CursorVisualStyle::BlockHollow, false) => 2,
-        (crate::ghostty::CursorVisualStyle::Underline, true) => 3,
-        (crate::ghostty::CursorVisualStyle::Underline, false) => 4,
-        (crate::ghostty::CursorVisualStyle::Bar, true) => 5,
-        (crate::ghostty::CursorVisualStyle::Bar, false) => 6,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputState {
     pub alternate_screen: bool,
@@ -123,6 +110,7 @@ pub(crate) struct GhosttyPaneCore {
     pub render_state: crate::ghostty::RenderState,
     output_revision: u64,
     clean_render_output_revision: u64,
+    out_of_loop_render_state_updates: u64,
     pub kitty_keyboard: KittyKeyboardTracker,
     pub initial_default_foreground: Option<crate::ghostty::RgbColor>,
     pub initial_default_background: Option<crate::ghostty::RgbColor>,
@@ -384,6 +372,7 @@ impl GhosttyPaneTerminal {
                 render_state,
                 output_revision: 0,
                 clean_render_output_revision: 0,
+                out_of_loop_render_state_updates: 0,
                 kitty_keyboard: KittyKeyboardTracker::default(),
                 initial_default_foreground,
                 initial_default_background,
@@ -596,7 +585,7 @@ impl GhosttyPaneTerminal {
             .unwrap_or(false);
         if CURSOR_POSITION_SETTLE_ENABLED {
             let cursor_started = crate::render_prof::timer();
-            let cursor_after_write = current_cursor_state(&mut core);
+            let cursor_after_write = current_cursor_state(&core);
             crate::render_prof::duration_since("pty.cursor_state_update", cursor_started);
             core.cursor_settle_state
                 .observe(cursor_after_write, Instant::now());
@@ -1018,9 +1007,9 @@ impl GhosttyPaneTerminal {
     }
 
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
-        let mut core = self.core.lock().ok()?;
-        let current = current_cursor_state(&mut core);
-        effective_cursor_state(&mut core, current)
+        let core = self.core.lock().ok()?;
+        let current = current_cursor_state(&core);
+        effective_cursor_state(&core, current)
     }
 
     pub fn synchronized_output_active(&self) -> bool {
@@ -1185,7 +1174,7 @@ impl GhosttyPaneTerminal {
         self.core
             .lock()
             .ok()
-            .and_then(|mut core| ghostty_visible_hyperlinks(&mut core, area).ok())
+            .and_then(|core| ghostty_visible_hyperlinks(&core, area).ok())
             .unwrap_or_default()
     }
 
@@ -1220,6 +1209,7 @@ impl GhosttyPaneTerminal {
             decscusr_tracker,
             output_revision,
             clean_render_output_revision,
+            out_of_loop_render_state_updates,
             ..
         } = &mut *core;
         if render_state.update(terminal).is_err() {
@@ -1305,11 +1295,14 @@ impl GhosttyPaneTerminal {
 
         ghostty_clear_render_dirty(render_state, area.height);
         *clean_render_output_revision = *output_revision;
+        // A full render re-reads the whole grid, so any out-of-loop
+        // render-state updates recorded since the last sync are absorbed here.
+        *out_of_loop_render_state_updates = 0;
 
         let current_cursor = cursor_state_from_render_state(render_state, decscusr_tracker);
         if show_cursor {
             if let Some(cursor) =
-                effective_cursor_state(&mut core, current_cursor).filter(|cursor| cursor.visible)
+                effective_cursor_state(&core, current_cursor).filter(|cursor| cursor.visible)
             {
                 if cursor.x < area.width && cursor.y < area.height {
                     frame.set_cursor_position((area.x + cursor.x, area.y + cursor.y));
@@ -1353,7 +1346,7 @@ fn cursor_position_settle_pending(core: &GhosttyPaneCore) -> bool {
 }
 
 fn effective_cursor_state(
-    core: &mut GhosttyPaneCore,
+    core: &GhosttyPaneCore,
     current: Option<TerminalCursorState>,
 ) -> Option<TerminalCursorState> {
     if !CURSOR_POSITION_SETTLE_ENABLED {
@@ -1380,16 +1373,36 @@ fn render_delay_after_pty_write(
     }
 }
 
-fn current_cursor_state(core: &mut GhosttyPaneCore) -> Option<TerminalCursorState> {
-    record_out_of_loop_render_state_update("render_state_update.out_of_loop.cursor_state");
-    let GhosttyPaneCore {
-        terminal,
-        render_state,
-        decscusr_tracker,
-        ..
-    } = core;
-    render_state.update(terminal).ok()?;
-    cursor_state_from_render_state(render_state, decscusr_tracker)
+/// Reads the cursor state straight from the terminal grid without touching
+/// the shared render state, so out-of-loop callers (the per-frame focused
+/// cursor read, API reads) cannot consume damage owed to
+/// `collect_dirty_patch`.
+fn current_cursor_state(core: &GhosttyPaneCore) -> Option<TerminalCursorState> {
+    let terminal = &core.terminal;
+    let rows = terminal.rows().ok()?;
+    if rows == 0 {
+        return None;
+    }
+    let x = terminal.cursor_x().ok()?;
+    let y = terminal.cursor_y().ok()?;
+    // The terminal reports the cursor relative to the active area (the bottom
+    // `rows` rows). Translate to viewport coordinates; when the viewport is
+    // scrolled back far enough that the cursor falls below it, there is no
+    // viewport cursor (matches RenderState::cursor_viewport() returning None).
+    let scrollbar = terminal.scrollbar().ok()?;
+    let scrolled_back = scrollbar
+        .total
+        .saturating_sub(scrollbar.offset.saturating_add(scrollbar.len));
+    let viewport_y = usize::from(y).saturating_add(scrolled_back);
+    if viewport_y >= usize::from(rows) {
+        return None;
+    }
+    Some(TerminalCursorState {
+        x,
+        y: viewport_y as u16,
+        visible: terminal.cursor_visible().ok()?,
+        shape: core.decscusr_tracker.cursor_shape(),
+    })
 }
 
 fn cursor_state_from_render_state(
@@ -1397,21 +1410,11 @@ fn cursor_state_from_render_state(
     decscusr_tracker: &DecscusrTracker,
 ) -> Option<TerminalCursorState> {
     let cursor = render_state.cursor_viewport().ok()??;
-    let shape = if decscusr_tracker.cursor_shape_overridden() {
-        render_state
-            .cursor_visual_style()
-            .ok()
-            .zip(render_state.cursor_blinking().ok())
-            .map(|(style, blinking)| decscusr_cursor_shape(style, blinking))
-            .unwrap_or(0)
-    } else {
-        0
-    };
     Some(TerminalCursorState {
         x: cursor.x,
         y: cursor.y,
         visible: render_state.cursor_visible().ok()?,
-        shape,
+        shape: decscusr_tracker.cursor_shape(),
     })
 }
 
@@ -1554,8 +1557,21 @@ fn ghostty_collect_dirty_patch(
         render_state,
         output_revision,
         clean_render_output_revision,
+        out_of_loop_render_state_updates,
         ..
     } = core;
+    if *out_of_loop_render_state_updates != 0 {
+        // A reader outside the render loop ran render_state.update() since the
+        // last collect/full render, consuming damage this collect can no
+        // longer see. Whatever dirty state remains may be incomplete, so force
+        // a full render regardless of Clean/Partial.
+        crate::render_prof::counter(
+            "dirty_collect.out_of_loop_updates",
+            *out_of_loop_render_state_updates,
+        );
+        *out_of_loop_render_state_updates = 0;
+        fallback!("out_of_loop_update_since_collect");
+    }
     let current_output_revision = *output_revision;
     let previous_clean_output_revision = *clean_render_output_revision;
     if render_state.update(terminal).is_err() {
@@ -1681,35 +1697,38 @@ fn ghostty_collect_dirty_patch(
 }
 
 fn ghostty_visible_hyperlinks(
-    core: &mut GhosttyPaneCore,
+    core: &GhosttyPaneCore,
     area: Rect,
 ) -> Result<VisibleHyperlinks, crate::ghostty::Error> {
-    record_out_of_loop_render_state_update("render_state_update.out_of_loop.visible_hyperlinks");
-    let GhosttyPaneCore {
-        terminal,
-        render_state,
-        ..
-    } = core;
-    render_state.update(terminal)?;
-    let mut row_iterator = crate::ghostty::RowIterator::new()?;
-    let mut row_cells = crate::ghostty::RowCells::new()?;
-    let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
+    let terminal = &core.terminal;
+    let rows = terminal.rows()?.min(area.height);
+    let cols = terminal.cols()?.min(area.width);
     let mut links = Vec::new();
-    let mut y = 0u16;
-    while y < area.height && rows.next() {
-        let mut cells = rows.populate_cells(&mut row_cells)?;
-        let mut x = 0u16;
-        while x < area.width && cells.next() {
-            if cells.has_hyperlink()? {
-                if let Some(uri) = terminal.viewport_hyperlink_uri(x, y.into())? {
-                    links.push(((area.x + x, area.y + y), ghostty_cell_symbol(&cells)?, uri));
-                }
+    for y in 0..rows {
+        for x in 0..cols {
+            if let Some(uri) = terminal.viewport_hyperlink_uri(x, y.into())? {
+                let (wide, graphemes) = terminal.viewport_cell(x, y.into())?;
+                links.push((
+                    (area.x + x, area.y + y),
+                    ghostty_viewport_cell_symbol(wide, graphemes),
+                    uri,
+                ));
             }
-            x += 1;
         }
-        y += 1;
     }
     Ok(links)
+}
+
+fn ghostty_viewport_cell_symbol(wide: crate::ghostty::CellWide, graphemes: Vec<u32>) -> String {
+    if wide == crate::ghostty::CellWide::SpacerTail {
+        return String::new();
+    }
+    if graphemes.is_empty()
+        || graphemes.first().copied() == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER)
+    {
+        return " ".to_string();
+    }
+    graphemes.into_iter().filter_map(char::from_u32).collect()
 }
 
 fn ghostty_visible_text(core: &GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
@@ -1930,22 +1949,6 @@ fn push_plain_cell(line: &mut String, wide: crate::ghostty::CellWide, graphemes:
             }
         }
     }
-}
-
-fn ghostty_cell_symbol(
-    cells: &crate::ghostty::RowCellIter<'_>,
-) -> Result<String, crate::ghostty::Error> {
-    if cells.wide()? == crate::ghostty::CellWide::SpacerTail {
-        return Ok(String::new());
-    }
-    let text = cells.grapheme_text()?;
-    if text.chars().next().map(u32::from) == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER) {
-        return Ok(" ".to_string());
-    }
-    if text.is_empty() {
-        return Ok(" ".to_string());
-    }
-    Ok(text)
 }
 
 pub(super) fn ghostty_blank_symbol_for_width(wide: crate::ghostty::CellWide) -> &'static str {
@@ -2215,6 +2218,11 @@ fn cursor_color_query_color(core: &mut GhosttyPaneCore) -> Option<crate::ghostty
 
 fn palette_color_query_response(index: u8, core: &mut GhosttyPaneCore) -> Option<Bytes> {
     record_out_of_loop_render_state_update("render_state_update.out_of_loop.palette_query");
+    // The palette lives on the render state, so this read must run update()
+    // and may consume damage owed to collect_dirty_patch. Count it so the next
+    // collect falls back to a full render instead of shipping an incomplete
+    // patch. Palette queries are rare, so the fallback cost is negligible.
+    core.out_of_loop_render_state_updates = core.out_of_loop_render_state_updates.wrapping_add(1);
     let GhosttyPaneCore {
         terminal,
         render_state,
@@ -2512,38 +2520,6 @@ mod tests {
             output.push(HEX[usize::from(byte >> 4)]);
             output.push(HEX[usize::from(byte & 0x0f)]);
         }
-    }
-
-    #[test]
-    fn decscusr_cursor_shape_preserves_blinking_variants() {
-        assert_eq!(
-            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Block, true),
-            1
-        );
-        assert_eq!(
-            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Block, false),
-            2
-        );
-        assert_eq!(
-            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Underline, true),
-            3
-        );
-        assert_eq!(
-            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Underline, false),
-            4
-        );
-        assert_eq!(
-            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Bar, true),
-            5
-        );
-        assert_eq!(
-            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Bar, false),
-            6
-        );
-        assert_eq!(
-            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::BlockHollow, false),
-            2
-        );
     }
 
     #[test]
@@ -4053,6 +4029,202 @@ mod tests {
             other => panic!("expected dirty patch after visible read, got {other:?}"),
         };
         assert!(patch.rows[0].1.iter().any(|cell| cell.symbol == "/"));
+    }
+
+    fn patch_row_contains_symbol(patch: &TerminalDirtyPatch, y: u16, symbol: &str) -> bool {
+        patch
+            .rows
+            .iter()
+            .filter(|(row, _)| *row == y)
+            .any(|(_, cells)| cells.iter().any(|cell| cell.symbol == symbol))
+    }
+
+    #[test]
+    fn cursor_state_read_does_not_consume_dirty_patch_damage() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut frame_terminal = ratatui::Terminal::new(backend).unwrap();
+        frame_terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.process_pty_bytes(pane_id, 0, b"one", &tx);
+        assert_eq!(
+            pane.cursor_state()
+                .map(|cursor| (cursor.x, cursor.y, cursor.visible)),
+            Some((3, 0, true))
+        );
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[2;1Htwo", &tx);
+
+        let patch = match pane.collect_dirty_patch(20, 5) {
+            TerminalDirtyPatchOutcome::Patch(patch) => patch,
+            other => panic!("expected dirty patch covering both writes, got {other:?}"),
+        };
+        assert!(
+            patch_row_contains_symbol(&patch, 0, "e"),
+            "cursor read ate the first write's damage: {:?}",
+            patch.rows
+        );
+        assert!(
+            patch_row_contains_symbol(&patch, 1, "w"),
+            "second write's damage missing: {:?}",
+            patch.rows
+        );
+    }
+
+    #[test]
+    fn visible_hyperlinks_read_does_not_consume_dirty_patch_damage() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut frame_terminal = ratatui::Terminal::new(backend).unwrap();
+        frame_terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        // The hyperlink scan walks the whole viewport whether or not any link
+        // is present, so a link-free screen exercises the same read path
+        // while keeping the pane on the patch path (dirty rows containing
+        // hyperlinks always fall back).
+        pane.process_pty_bytes(pane_id, 0, b"one", &tx);
+        assert!(pane.visible_hyperlinks(Rect::new(0, 0, 20, 5)).is_empty());
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[2;1Htwo", &tx);
+
+        let patch = match pane.collect_dirty_patch(20, 5) {
+            TerminalDirtyPatchOutcome::Patch(patch) => patch,
+            other => panic!("expected dirty patch covering both writes, got {other:?}"),
+        };
+        assert!(
+            patch_row_contains_symbol(&patch, 0, "e"),
+            "hyperlink read ate the first write's damage: {:?}",
+            patch.rows
+        );
+        assert!(
+            patch_row_contains_symbol(&patch, 1, "w"),
+            "second write's damage missing: {:?}",
+            patch.rows
+        );
+    }
+
+    #[test]
+    fn visible_hyperlinks_extracts_links_and_never_ships_partial_patch() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut frame_terminal = ratatui::Terminal::new(backend).unwrap();
+        frame_terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.process_pty_bytes(
+            pane_id,
+            0,
+            b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\",
+            &tx,
+        );
+        let links = pane.visible_hyperlinks(Rect::new(0, 0, 20, 5));
+        assert!(
+            links.iter().any(|((x, y), symbol, uri)| (*x, *y) == (0, 0)
+                && symbol == "l"
+                && uri == "https://example.com"),
+            "expected hyperlink at origin, got {links:?}"
+        );
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[3;1Htwo", &tx);
+        // With a hyperlink on screen the collect may fall back (hyperlink rows
+        // re-dirty on every update), but it must never ship a partial patch
+        // missing one of the writes' rows.
+        match pane.collect_dirty_patch(20, 5) {
+            TerminalDirtyPatchOutcome::Fallback => {}
+            TerminalDirtyPatchOutcome::Patch(patch) => {
+                assert!(
+                    patch_row_contains_symbol(&patch, 0, "k")
+                        && patch_row_contains_symbol(&patch, 2, "w"),
+                    "patch missing damage from one of the writes: {:?}",
+                    patch.rows
+                );
+            }
+            TerminalDirtyPatchOutcome::Clean => {
+                panic!("collect reported Clean despite pending damage")
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_loop_reads_keep_retained_patch_path() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut frame_terminal = ratatui::Terminal::new(backend).unwrap();
+        frame_terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.process_pty_bytes(pane_id, 0, b"one", &tx);
+        assert!(matches!(
+            pane.collect_dirty_patch(20, 5),
+            TerminalDirtyPatchOutcome::Patch(_)
+        ));
+
+        // Per-frame out-of-loop reads must not degrade the retained path.
+        let _ = pane.cursor_state();
+        let _ = pane.visible_hyperlinks(Rect::new(0, 0, 20, 5));
+        let _ = pane.visible_text();
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[2;1Htwo", &tx);
+        assert!(matches!(
+            pane.collect_dirty_patch(20, 5),
+            TerminalDirtyPatchOutcome::Patch(_)
+        ));
+
+        let _ = pane.cursor_state();
+        assert_eq!(
+            pane.collect_dirty_patch(20, 5),
+            TerminalDirtyPatchOutcome::Clean
+        );
+    }
+
+    #[test]
+    fn palette_query_forces_full_render_before_next_patch() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut frame_terminal = ratatui::Terminal::new(backend).unwrap();
+        frame_terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.process_pty_bytes(pane_id, 0, b"one", &tx);
+        // The palette query renders through the shared render state and may
+        // consume the pending damage, so the next collect must fall back.
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]4;0;?\x07", &tx);
+        assert_eq!(result.terminal_responses.len(), 1);
+        assert_eq!(
+            pane.collect_dirty_patch(20, 5),
+            TerminalDirtyPatchOutcome::Fallback
+        );
+
+        // The fallback's full render re-syncs; patches resume afterwards.
+        frame_terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[2;1Htwo", &tx);
+        let patch = match pane.collect_dirty_patch(20, 5) {
+            TerminalDirtyPatchOutcome::Patch(patch) => patch,
+            other => panic!("expected dirty patch after full render, got {other:?}"),
+        };
+        assert!(patch_row_contains_symbol(&patch, 1, "w"));
     }
 
     #[test]
