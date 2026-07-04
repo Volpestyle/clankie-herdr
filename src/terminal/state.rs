@@ -22,6 +22,7 @@ pub struct HookAuthority {
     pub message: Option<String>,
     pub reported_at: Instant,
     pub session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    pub session_report: Option<crate::agent_resume::AgentSessionReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,7 @@ struct SuppressedFullLifecycleHookReport {
     observed_at: Instant,
     reason: FullLifecycleHookSuppressionReason,
     replacement_session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    replacement_session_report: Option<crate::agent_resume::AgentSessionReport>,
     pending_replacement_report: Option<PendingFullLifecycleHookReport>,
 }
 
@@ -324,7 +326,7 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
-        let previous_session = self.current_session_identity_for_persistence();
+        let previous_session = self.current_session_identity_for_api();
         let newer_custom_authority = process_exited
             && self.hook_authority.as_ref().is_some_and(|authority| {
                 crate::detect::parse_agent_label(&authority.agent_label) == agent
@@ -354,8 +356,7 @@ impl TerminalState {
                     previous_presentation,
                     now,
                 ),
-                session_ref_changed: previous_session
-                    != self.current_session_identity_for_persistence(),
+                session_ref_changed: previous_session != self.current_session_identity_for_api(),
                 agent_released: false,
             };
         }
@@ -373,8 +374,7 @@ impl TerminalState {
                     previous_presentation,
                     now,
                 ),
-                session_ref_changed: previous_session
-                    != self.current_session_identity_for_persistence(),
+                session_ref_changed: previous_session != self.current_session_identity_for_api(),
                 agent_released: false,
             };
         }
@@ -437,6 +437,7 @@ impl TerminalState {
                     }
                 }
                 suppressed.session_ref = exited_session_ref;
+                suppressed.replacement_session_report = None;
                 suppressed.pending_replacement_report = None;
                 suppressed.observed_at = now;
                 reset_sources.push(source.clone());
@@ -563,6 +564,7 @@ impl TerminalState {
                         source: authority.source.clone(),
                         agent: authority.agent_label.clone(),
                         session_ref: session_ref.clone(),
+                        report: authority.session_report.clone(),
                     }
                 })
             });
@@ -583,8 +585,7 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session
-                != self.current_session_identity_for_persistence(),
+            session_ref_changed: previous_session != self.current_session_identity_for_api(),
             agent_released,
         }
     }
@@ -610,6 +611,7 @@ impl TerminalState {
         .and_then(|mutation| mutation.effective_state_change)
     }
 
+    #[cfg(test)]
     pub fn set_hook_authority_with_session_ref(
         &mut self,
         source: String,
@@ -619,17 +621,40 @@ impl TerminalState {
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         seq: Option<u64>,
     ) -> Option<TerminalStateMutation> {
-        self.set_hook_authority_at(
+        self.set_hook_authority_with_reported_session(
             source,
             agent_label,
             state,
             message,
             session_ref,
+            None,
+            seq,
+        )
+    }
+
+    pub fn set_hook_authority_with_reported_session(
+        &mut self,
+        source: String,
+        agent_label: String,
+        state: AgentState,
+        message: Option<String>,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        session_report: Option<crate::agent_resume::AgentSessionReport>,
+        seq: Option<u64>,
+    ) -> Option<TerminalStateMutation> {
+        self.set_hook_authority_with_reported_session_at(
+            source,
+            agent_label,
+            state,
+            message,
+            session_ref,
+            session_report,
             seq,
             Instant::now(),
         )
     }
 
+    #[cfg(test)]
     pub fn set_hook_authority_at(
         &mut self,
         source: String,
@@ -637,6 +662,29 @@ impl TerminalState {
         state: AgentState,
         message: Option<String>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        seq: Option<u64>,
+        now: Instant,
+    ) -> Option<TerminalStateMutation> {
+        self.set_hook_authority_with_reported_session_at(
+            source,
+            agent_label,
+            state,
+            message,
+            session_ref,
+            None,
+            seq,
+            now,
+        )
+    }
+
+    fn set_hook_authority_with_reported_session_at(
+        &mut self,
+        source: String,
+        agent_label: String,
+        state: AgentState,
+        message: Option<String>,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        session_report: Option<crate::agent_resume::AgentSessionReport>,
         seq: Option<u64>,
         now: Instant,
     ) -> Option<TerminalStateMutation> {
@@ -656,6 +704,7 @@ impl TerminalState {
             state,
             message.as_deref(),
             &session_ref,
+            session_report.as_ref(),
             seq,
             now,
         ) {
@@ -675,6 +724,7 @@ impl TerminalState {
         if owner_conflicts && !foreground_takeover_allowed {
             return None;
         }
+        let mut session_report = session_report;
         let session_ref = session_ref.map(|session_ref| {
             if self.lifecycle_hook_report_replaces_persisted_session(
                 &source,
@@ -682,9 +732,13 @@ impl TerminalState {
                 &session_ref,
             ) {
                 session_ref
-            } else {
+            } else if let Some(current_session_ref) =
                 self.conflicting_same_owner_session_ref(&source, &agent_label, &session_ref, None)
-                    .unwrap_or(session_ref)
+            {
+                session_report = self.current_session_report_for_owner(&source, &agent_label);
+                current_session_ref
+            } else {
+                session_ref
             }
         });
         if self.live_full_lifecycle_hook_authority_conflicts_with_session(
@@ -705,7 +759,7 @@ impl TerminalState {
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
-        let previous_session = self.current_session_identity_for_persistence();
+        let previous_session = self.current_session_identity_for_api();
         self.reconcile_agent_name_owner(&agent_label, session_ref.as_ref());
         if foreground_takeover_allowed {
             self.suppress_current_full_lifecycle_hook_authority(
@@ -724,6 +778,7 @@ impl TerminalState {
             }
         }
         self.persisted_agent_session = None;
+        let session_report = session_ref.as_ref().and(session_report);
         self.hook_authority = Some(HookAuthority {
             source,
             agent_label,
@@ -731,8 +786,9 @@ impl TerminalState {
             message,
             reported_at: now,
             session_ref,
+            session_report,
         });
-        let current_session = self.current_session_identity_for_persistence();
+        let current_session = self.current_session_identity_for_api();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -851,6 +907,7 @@ impl TerminalState {
                 observed_at,
                 reason,
                 replacement_session_ref: None,
+                replacement_session_report: None,
                 pending_replacement_report: None,
             },
         );
@@ -863,6 +920,7 @@ impl TerminalState {
         state: AgentState,
         message: Option<&str>,
         session_ref: &Option<crate::agent_resume::AgentSessionRef>,
+        session_report: Option<&crate::agent_resume::AgentSessionReport>,
         seq: Option<u64>,
         reported_at: Instant,
     ) -> FullLifecycleHookReportRoute {
@@ -966,6 +1024,7 @@ impl TerminalState {
                 observed_at: reported_at,
                 reason: FullLifecycleHookSuppressionReason::ProcessExit,
                 replacement_session_ref: None,
+                replacement_session_report: None,
                 pending_replacement_report: None,
             });
         let replace_pending = suppressed
@@ -981,6 +1040,7 @@ impl TerminalState {
                     message: message.map(str::to_string),
                     reported_at,
                     session_ref: Some(session_ref),
+                    session_report: session_report.cloned(),
                 },
                 seq,
             });
@@ -1097,6 +1157,8 @@ impl TerminalState {
                 }
                 if suppressed.reason == FullLifecycleHookSuppressionReason::ProcessExit {
                     if let Some(session_ref) = suppressed.replacement_session_ref.take() {
+                        let replacement_session_report =
+                            suppressed.replacement_session_report.take();
                         if let Some(exited_session_ref) = suppressed
                             .session_ref
                             .as_ref()
@@ -1125,6 +1187,7 @@ impl TerminalState {
                             suppressed.agent_label.clone(),
                             session_ref,
                             pending,
+                            replacement_session_report,
                         ));
                         return false;
                     }
@@ -1151,18 +1214,28 @@ impl TerminalState {
         self.hook_report_sequences.retain(|source, _| {
             validated_replacement_sessions
                 .iter()
-                .any(|(validated_source, _, _, _)| validated_source == source)
+                .any(|(validated_source, _, _, _, _)| validated_source == source)
                 || !crate::detect::full_lifecycle_hook_authority(source, detected_label)
         });
-        for (source, agent_label, session_ref, pending) in validated_replacement_sessions {
+        for (source, agent_label, session_ref, pending, replacement_session_report) in
+            validated_replacement_sessions
+        {
             self.forget_stale_full_lifecycle_hook_session(&source, &agent_label, &session_ref);
             self.reconcile_agent_name_owner(&agent_label, Some(&session_ref));
+            let session_report = pending
+                .as_ref()
+                .and_then(|pending| pending.authority.session_report.clone())
+                .or(replacement_session_report);
             self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
                 source: source.clone(),
                 agent: agent_label,
                 session_ref,
+                report: session_report.clone(),
             });
-            if let Some(pending) = pending {
+            if let Some(mut pending) = pending {
+                if pending.authority.session_report.is_none() {
+                    pending.authority.session_report = session_report;
+                }
                 self.hook_report_sequences.insert(source, pending.seq);
                 self.hook_authority = Some(pending.authority);
             }
@@ -1253,6 +1326,72 @@ impl TerminalState {
                 session.session_ref.value.clone(),
             )
         })
+    }
+
+    fn current_session_identity_for_api(
+        &self,
+    ) -> Option<(
+        String,
+        String,
+        crate::agent_resume::AgentSessionRefKind,
+        String,
+        Option<String>,
+        Option<String>,
+    )> {
+        if let Some(authority) = self.hook_authority.as_ref() {
+            if let Some(session_ref) = authority.session_ref.as_ref() {
+                return Some((
+                    authority.source.clone(),
+                    authority.agent_label.clone(),
+                    session_ref.kind,
+                    session_ref.value.clone(),
+                    authority
+                        .session_report
+                        .as_ref()
+                        .and_then(|report| report.agent_session_id.clone()),
+                    authority
+                        .session_report
+                        .as_ref()
+                        .and_then(|report| report.agent_session_path.clone()),
+                ));
+            }
+        }
+        self.persisted_agent_session.as_ref().map(|session| {
+            (
+                session.source.clone(),
+                session.agent.clone(),
+                session.session_ref.kind,
+                session.session_ref.value.clone(),
+                session
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.agent_session_id.clone()),
+                session
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.agent_session_path.clone()),
+            )
+        })
+    }
+
+    fn current_session_report_for_owner(
+        &self,
+        source: &str,
+        agent_label: &str,
+    ) -> Option<crate::agent_resume::AgentSessionReport> {
+        if let Some(authority) = self.hook_authority.as_ref() {
+            if authority.source == source
+                && authority.agent_label == agent_label
+                && authority.session_ref.is_some()
+            {
+                return authority.session_report.clone();
+            }
+        }
+
+        self.persisted_agent_session
+            .as_ref()
+            .filter(|session| session.source == source && session.agent == agent_label)
+            .and_then(|session| session.report.clone())
     }
 
     fn current_session_owner_conflicts(&self, source: &str, agent_label: &str) -> bool {
@@ -1367,6 +1506,7 @@ impl TerminalState {
         self.persisted_agent_session = Some(session);
     }
 
+    #[cfg(test)]
     pub fn set_agent_session_ref(
         &mut self,
         source: String,
@@ -1377,11 +1517,31 @@ impl TerminalState {
         self.set_agent_session_ref_for_session_start(source, agent_label, session_ref, seq, None)
     }
 
+    #[cfg(test)]
     pub fn set_agent_session_ref_for_session_start(
         &mut self,
         source: String,
         agent_label: String,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        seq: Option<u64>,
+        session_start_source: Option<String>,
+    ) -> Option<TerminalStateMutation> {
+        self.set_agent_session_report_for_session_start(
+            source,
+            agent_label,
+            session_ref,
+            None,
+            seq,
+            session_start_source,
+        )
+    }
+
+    pub fn set_agent_session_report_for_session_start(
+        &mut self,
+        source: String,
+        agent_label: String,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        session_report: Option<crate::agent_resume::AgentSessionReport>,
         seq: Option<u64>,
         session_start_source: Option<String>,
     ) -> Option<TerminalStateMutation> {
@@ -1436,9 +1596,11 @@ impl TerminalState {
                     observed_at: Instant::now(),
                     reason: FullLifecycleHookSuppressionReason::ProcessExit,
                     replacement_session_ref: None,
+                    replacement_session_report: None,
                     pending_replacement_report: None,
                 });
             suppressed.replacement_session_ref = Some(session_ref);
+            suppressed.replacement_session_report = session_report;
             suppressed.pending_replacement_report = None;
             return None;
         }
@@ -1464,7 +1626,7 @@ impl TerminalState {
             let now = Instant::now();
             let previous_presentation =
                 self.effective_presentation_for_state_at(previous_state, now);
-            let previous_session = self.current_session_identity_for_persistence();
+            let previous_session = self.current_session_identity_for_api();
             let suppressed = self
                 .suppressed_full_lifecycle_hook_reports
                 .entry(source.clone())
@@ -1474,6 +1636,7 @@ impl TerminalState {
                     observed_at: now,
                     reason: FullLifecycleHookSuppressionReason::ProcessExit,
                     replacement_session_ref: None,
+                    replacement_session_report: None,
                     pending_replacement_report: None,
                 });
             if suppressed.replacement_session_ref.as_ref() != Some(&session_ref) {
@@ -1488,11 +1651,12 @@ impl TerminalState {
                 }
                 suppressed.replacement_session_ref = Some(session_ref);
             }
+            suppressed.replacement_session_report = session_report;
             self.hook_report_sequences.insert(source.clone(), seq);
 
             if process_present {
                 self.clear_full_lifecycle_hook_suppression_for_detected_agent(None, known_agent);
-                let current_session = self.current_session_identity_for_persistence();
+                let current_session = self.current_session_identity_for_api();
                 return Some(TerminalStateMutation {
                     effective_state_change: self.recompute_effective_state(
                         previous_agent_label,
@@ -1569,7 +1733,7 @@ impl TerminalState {
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
-        let previous_session = self.current_session_identity_for_persistence();
+        let previous_session = self.current_session_identity_for_api();
         if session_replacement_allowed || foreground_takeover_allowed {
             self.forget_stale_full_lifecycle_hook_session(&source, &agent_label, &session_ref);
         }
@@ -1591,8 +1755,9 @@ impl TerminalState {
             source,
             agent: agent_label,
             session_ref,
+            report: session_report,
         });
-        let current_session = self.current_session_identity_for_persistence();
+        let current_session = self.current_session_identity_for_api();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -2199,6 +2364,7 @@ mod tests {
             source: source.into(),
             agent: agent_label.into(),
             session_ref,
+            report: None,
         });
     }
 
@@ -2691,6 +2857,7 @@ mod tests {
             agent: "pi".into(),
             session_ref: crate::agent_resume::AgentSessionRef::path(old_session)
                 .expect("test session path should be valid"),
+            report: None,
         });
 
         let startup = terminal.set_agent_session_ref_for_session_start(
@@ -2987,6 +3154,10 @@ mod tests {
     fn rapid_restart_replays_reports_that_arrive_before_process_evidence() {
         let mut terminal = test_terminal();
         let session_path = test_session_path("reports-before-process-evidence.jsonl");
+        let session_report = crate::agent_resume::AgentSessionReport {
+            agent_session_id: Some("pi-restarted-session".into()),
+            agent_session_path: Some(session_path.clone()),
+        };
         let now = Instant::now();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_at(
@@ -3035,10 +3206,11 @@ mod tests {
             Some(2001),
             now + Duration::from_millis(4),
         );
-        let startup = terminal.set_agent_session_ref_for_session_start(
+        let startup = terminal.set_agent_session_report_for_session_start(
             "herdr:pi".into(),
             "pi".into(),
             crate::agent_resume::AgentSessionRef::path(session_path),
+            Some(session_report.clone()),
             Some(2000),
             Some("startup".into()),
         );
@@ -3060,6 +3232,10 @@ mod tests {
 
         assert!(terminal.full_lifecycle_hook_authority_active());
         assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(
+            terminal.current_session_report_for_owner("herdr:pi", "pi"),
+            Some(session_report)
+        );
     }
 
     #[test]
@@ -4726,6 +4902,7 @@ mod tests {
                 observed_at: Instant::now(),
                 reason: FullLifecycleHookSuppressionReason::ProcessExit,
                 replacement_session_ref: None,
+                replacement_session_report: None,
                 pending_replacement_report: None,
             },
         );
@@ -5029,6 +5206,7 @@ mod tests {
                 source: "herdr:codex".into(),
                 agent: "codex".into(),
                 session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+                report: None,
             });
             terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
 
@@ -5065,6 +5243,7 @@ mod tests {
                 source: "herdr:codex".into(),
                 agent: "codex".into(),
                 session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+                report: None,
             });
             terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
 
@@ -5100,6 +5279,7 @@ mod tests {
                     source: "herdr:codex".into(),
                     agent: "codex".into(),
                     session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+                    report: None,
                 });
                 terminal.set_detected_state(detected_agent, AgentState::Idle);
 
@@ -5134,6 +5314,7 @@ mod tests {
             source: "herdr:codex".into(),
             agent: "codex".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+            report: None,
         });
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
 
@@ -5555,6 +5736,7 @@ mod tests {
             source: "herdr:hermes".into(),
             agent: "hermes".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("hermes-session").unwrap(),
+            report: None,
         });
 
         let mutation = terminal
@@ -5573,6 +5755,7 @@ mod tests {
             source: "herdr:claude".into(),
             agent: "claude".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
+            report: None,
         });
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
 
@@ -5600,6 +5783,7 @@ mod tests {
             source: "herdr:pi".into(),
             agent: "pi".into(),
             session_ref: session_ref.clone(),
+            report: None,
         });
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
 
@@ -5633,6 +5817,7 @@ mod tests {
             source: "herdr:claude".into(),
             agent: "claude".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
+            report: None,
         });
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
 
@@ -5665,6 +5850,7 @@ mod tests {
             source: "herdr:codex".into(),
             agent: "codex".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+            report: None,
         });
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         terminal.set_detected_agent_process_at(Agent::Codex, Instant::now());
@@ -5774,6 +5960,7 @@ mod tests {
             source: "herdr:opencode".into(),
             agent: "opencode".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("opencode-session").unwrap(),
+            report: None,
         });
 
         let first =
@@ -5793,6 +5980,7 @@ mod tests {
             source: "herdr:hermes".into(),
             agent: "hermes".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("hermes-session").unwrap(),
+            report: None,
         });
 
         let mutation = terminal.set_detected_state_with_mutation(None, AgentState::Unknown);

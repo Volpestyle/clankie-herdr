@@ -1117,6 +1117,7 @@ mod tests {
             source: "herdr:pi".into(),
             agent: "pi".into(),
             session_ref: crate::agent_resume::AgentSessionRef::path(session_path.clone()).unwrap(),
+            report: None,
         });
         terminal.set_hook_authority_with_session_ref(
             "herdr:pi".into(),
@@ -1158,6 +1159,7 @@ mod tests {
                 source: "herdr:opencode".into(),
                 agent: "opencode".into(),
                 session_ref: crate::agent_resume::AgentSessionRef::id("opencode-session").unwrap(),
+                report: None,
             });
 
         let snapshot = capture_from_state(&state);

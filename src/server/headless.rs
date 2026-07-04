@@ -7597,6 +7597,7 @@ next_tab = ""
                 message: None,
                 seq: None,
                 session_ref: None,
+                session_report: None,
             })
         );
         assert!(
@@ -12220,6 +12221,7 @@ next_tab = ""
                         .to_string(),
                 )
                 .unwrap(),
+                report: None,
             });
         server
             .app

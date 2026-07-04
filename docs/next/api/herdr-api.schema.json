@@ -775,6 +775,18 @@
                 }
               ]
             },
+            "agent_session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_session_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
             },
@@ -6181,6 +6193,18 @@
                 }
               ]
             },
+            "agent_session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_session_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
@@ -7460,6 +7484,18 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "agent_session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_session_path": {
+              "type": [
+                "string",
+                "null"
               ]
             },
             "agent_status": {

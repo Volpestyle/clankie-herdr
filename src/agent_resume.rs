@@ -30,6 +30,13 @@ pub struct PersistedAgentSession {
     pub source: String,
     pub agent: String,
     pub session_ref: AgentSessionRef,
+    pub report: Option<AgentSessionReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSessionReport {
+    pub agent_session_id: Option<String>,
+    pub agent_session_path: Option<String>,
 }
 
 impl AgentSessionRef {
@@ -67,6 +74,28 @@ pub fn session_ref_from_report(
     }
 
     agent_session_id.and_then(AgentSessionRef::id)
+}
+
+pub fn session_report_from_report(
+    source: &str,
+    agent: &str,
+    agent_session_id: Option<String>,
+    agent_session_path: Option<String>,
+) -> Option<AgentSessionReport> {
+    if !is_official_agent_source(source, agent) {
+        return None;
+    }
+
+    let agent_session_id = agent_session_id
+        .and_then(AgentSessionRef::id)
+        .map(|session_ref| session_ref.value);
+    let agent_session_path = agent_session_path
+        .and_then(AgentSessionRef::path)
+        .map(|session_ref| session_ref.value);
+    (agent_session_id.is_some() || agent_session_path.is_some()).then_some(AgentSessionReport {
+        agent_session_id,
+        agent_session_path,
+    })
 }
 
 pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
@@ -112,6 +141,7 @@ pub fn session_ref_from_snapshot(
         source: source.to_string(),
         agent: agent.to_string(),
         session_ref,
+        report: None,
     })
 }
 

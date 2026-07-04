@@ -383,6 +383,8 @@ impl App {
             state_labels: pane.state_labels,
             tokens: pane.tokens,
             agent_session: pane.agent_session,
+            agent_session_id: pane.agent_session_id,
+            agent_session_path: pane.agent_session_path,
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,
             pane_id: pane.pane_id,

@@ -81,6 +81,7 @@ pub enum AppEvent {
         message: Option<String>,
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        session_report: Option<crate::agent_resume::AgentSessionReport>,
     },
     /// Agent session identity was reported without state authority.
     AgentSessionReported {
@@ -89,6 +90,7 @@ pub enum AppEvent {
         agent_label: String,
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        session_report: Option<crate::agent_resume::AgentSessionReport>,
         session_start_source: Option<String>,
     },
     /// Display-only agent metadata was reported for a pane.

@@ -727,15 +727,17 @@ Session-only official integrations report native session references with `pane.r
 }
 ```
 
-`pane.get`, `pane.list`, `agent.get`, and `agent.list` expose a read-only `agent_session` object when Herdr has a stored native session reference:
+`pane.get`, `pane.list`, `agent.get`, and `agent.list` expose a read-only `agent_session` object when Herdr has a stored native session reference. When the accepted integration report included a raw native session id or path, the pane and agent payloads also include `agent_session_id` and `agent_session_path`:
 
 ```json
 {
+  "agent_session_id": "claude-session",
+  "agent_session_path": "/Users/me/.claude/projects/example/claude-session.jsonl",
   "agent_session": {
-    "source": "herdr:codex",
-    "agent": "codex",
+    "source": "herdr:claude",
+    "agent": "claude",
     "kind": "id",
-    "value": "..."
+    "value": "claude-session"
   }
 }
 ```

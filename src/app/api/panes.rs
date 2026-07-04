@@ -1295,14 +1295,24 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
-        self.handle_internal_event(crate::events::AppEvent::HookStateReported {
-            pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id.clone(),
+            params.agent_session_path.clone(),
+        );
+        let session_report = session_ref.as_ref().and_then(|_| {
+            crate::agent_resume::session_report_from_report(
                 &params.source,
                 &agent_label,
                 params.agent_session_id,
                 params.agent_session_path,
-            ),
+            )
+        });
+        self.handle_internal_event(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            session_ref,
+            session_report,
             source: params.source,
             agent_label,
             state: detect_state_from_api(params.state),
@@ -1324,14 +1334,24 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
-        self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
-            pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id.clone(),
+            params.agent_session_path.clone(),
+        );
+        let session_report = session_ref.as_ref().and_then(|_| {
+            crate::agent_resume::session_report_from_report(
                 &params.source,
                 &agent_label,
                 params.agent_session_id,
                 params.agent_session_path,
-            ),
+            )
+        });
+        self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
+            pane_id,
+            session_ref,
+            session_report,
             source: params.source,
             agent_label,
             seq: params.seq,
@@ -2058,6 +2078,53 @@ mod tests {
     fn metadata_error_code(response: &str) -> String {
         let response: ErrorResponse = serde_json::from_str(response).unwrap();
         response.error.code
+    }
+
+    #[test]
+    fn pane_list_exposes_reported_agent_session_id_and_path() {
+        let (mut app, reported_pane_id) = app_with_test_workspace();
+        let unreported_pane =
+            app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let unreported_pane_id = app.public_pane_id(0, unreported_pane).unwrap();
+        let session_path = std::env::current_dir()
+            .unwrap()
+            .join(".local/test/claude-session.jsonl")
+            .display()
+            .to_string();
+
+        let report = app.handle_pane_report_agent(
+            "report".into(),
+            PaneReportAgentParams {
+                pane_id: reported_pane_id.clone(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                state: crate::api::schema::PaneAgentState::Working,
+                message: None,
+                seq: Some(1),
+                agent_session_id: Some("claude-session".into()),
+                agent_session_path: Some(session_path.clone()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&report).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        let list = app.handle_pane_list("list".into(), PaneListParams { workspace_id: None });
+        let payload: serde_json::Value = serde_json::from_str(&list).unwrap();
+        let panes = payload["result"]["panes"].as_array().unwrap();
+        let reported = panes
+            .iter()
+            .find(|pane| pane["pane_id"].as_str() == Some(reported_pane_id.as_str()))
+            .expect("reported pane should be listed");
+        let unreported = panes
+            .iter()
+            .find(|pane| pane["pane_id"].as_str() == Some(unreported_pane_id.as_str()))
+            .expect("unreported pane should be listed");
+
+        assert_eq!(reported["agent_session_id"], "claude-session");
+        assert_eq!(reported["agent_session_path"], session_path);
+        assert!(unreported.get("agent_session_id").is_none());
+        assert!(unreported.get("agent_session_path").is_none());
     }
 
     #[tokio::test]

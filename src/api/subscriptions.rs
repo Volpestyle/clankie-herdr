@@ -630,6 +630,8 @@ mod tests {
             state_labels: HashMap::new(),
             tokens: HashMap::new(),
             agent_session: None,
+            agent_session_id: None,
+            agent_session_path: None,
             scroll,
             revision: 0,
         }

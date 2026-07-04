@@ -442,6 +442,7 @@ impl App {
                 .focused_pane_id()
                 .is_some_and(|focused| focused == pane_id);
         let presentation = terminal.effective_presentation();
+        let agent_session_report = terminal_agent_session_report(terminal);
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             terminal_id: terminal.id.to_string(),
@@ -464,6 +465,10 @@ impl App {
             state_labels: presentation.state_labels,
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),
+            agent_session_id: agent_session_report
+                .and_then(|report| report.agent_session_id.clone()),
+            agent_session_path: agent_session_report
+                .and_then(|report| report.agent_session_path.clone()),
             scroll,
             revision: terminal.revision,
         })
@@ -540,4 +545,19 @@ fn terminal_agent_session_info(
             kind: session.session_ref.kind,
             value: session.session_ref.value.clone(),
         })
+}
+
+fn terminal_agent_session_report(
+    terminal: &crate::terminal::TerminalState,
+) -> Option<&crate::agent_resume::AgentSessionReport> {
+    if let Some(authority) = terminal.hook_authority.as_ref() {
+        if authority.session_ref.is_some() {
+            return authority.session_report.as_ref();
+        }
+    }
+
+    terminal
+        .persisted_agent_session
+        .as_ref()
+        .and_then(|session| session.report.as_ref())
 }

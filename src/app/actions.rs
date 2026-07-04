@@ -2822,21 +2822,30 @@ impl AppState {
                 message,
                 seq,
                 session_ref,
+                session_report,
             } => {
                 if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label) {
                     self.update_terminal_state(pane_id, |terminal| {
-                        terminal.set_agent_session_ref(source, agent_label, session_ref, seq)
+                        terminal.set_agent_session_report_for_session_start(
+                            source,
+                            agent_label,
+                            session_ref,
+                            session_report,
+                            seq,
+                            None,
+                        )
                     })
                     .into_iter()
                     .collect()
                 } else {
                     self.update_terminal_state(pane_id, |terminal| {
-                        terminal.set_hook_authority_with_session_ref(
+                        terminal.set_hook_authority_with_reported_session(
                             source,
                             agent_label,
                             state,
                             message,
                             session_ref,
+                            session_report,
                             seq,
                         )
                     })
@@ -2850,13 +2859,15 @@ impl AppState {
                 agent_label,
                 seq,
                 session_ref,
+                session_report,
                 session_start_source,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_agent_session_ref_for_session_start(
+                    terminal.set_agent_session_report_for_session_start(
                         source,
                         agent_label,
                         session_ref,
+                        session_report,
                         seq,
                         session_start_source,
                     )
@@ -5302,6 +5313,7 @@ mod tests {
             message: None,
             seq: None,
             session_ref: None,
+            session_report: None,
         });
 
         let toast = state.toast.as_ref().unwrap();
@@ -5340,6 +5352,7 @@ mod tests {
             message: None,
             seq: Some(1),
             session_ref: None,
+            session_report: None,
         });
         state.handle_app_event(AppEvent::StateChanged {
             pane_id: bg_pane_id,
@@ -5388,6 +5401,7 @@ mod tests {
             message: None,
             seq: Some(1),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session"),
+            session_report: None,
         });
         let terminal = state.terminals.get(&terminal_id).unwrap();
         assert_eq!(terminal.state, AgentState::Working);
@@ -5441,6 +5455,7 @@ mod tests {
                     .to_string(),
             )
             .unwrap(),
+            report: None,
         });
         terminal.set_hook_authority(
             "herdr:pi".into(),
@@ -5497,6 +5512,7 @@ mod tests {
             message: None,
             seq: Some(1),
             session_ref: crate::agent_resume::AgentSessionRef::id("devin-session"),
+            session_report: None,
         });
 
         let terminal = state.terminals.get(&terminal_id).unwrap();
@@ -5521,6 +5537,7 @@ mod tests {
             message: None,
             seq: Some(20),
             session_ref: crate::agent_resume::AgentSessionRef::path(first_session),
+            session_report: None,
         });
         assert_eq!(first_updates.len(), 1);
         state.session_dirty = false;
@@ -5533,6 +5550,7 @@ mod tests {
             message: None,
             seq: Some(21),
             session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
+            session_report: None,
         });
 
         assert!(second_updates.is_empty());
