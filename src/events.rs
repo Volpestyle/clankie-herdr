@@ -150,6 +150,8 @@ pub enum AppEvent {
         pane_id: PaneId,
         cwd: std::path::PathBuf,
     },
+    /// A pane's visible terminal output changed.
+    PaneOutputChanged { pane_id: PaneId, revision: u64 },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,

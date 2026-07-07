@@ -277,6 +277,8 @@ pub struct PaneReadParams {
     pub source: ReadSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_revision: Option<u64>,
     #[serde(default)]
     pub format: ReadFormat,
     #[serde(default = "super::default_true")]

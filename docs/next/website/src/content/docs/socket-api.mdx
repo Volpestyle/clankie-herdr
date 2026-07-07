@@ -821,7 +821,7 @@ Tab event subscriptions include `tab.created`, `tab.closed`, `tab.focused`,
 that workspace.
 Pane event subscriptions include `pane.created`, `pane.updated`, `pane.closed`, `pane.focused`,
 `pane.moved`, `pane.exited`, `pane.agent_detected`,
-`pane.output_matched`, `pane.agent_status_changed`, and `pane.scroll_changed`.
+`pane.output_changed`, `pane.output_matched`, `pane.agent_status_changed`, and `pane.scroll_changed`.
 Terminal-title changes can emit `pane.updated`, but spinner-only raw-title changes do not emit it when `terminal_title_stripped` is unchanged.
 `pane.scroll_changed` is scoped to one `pane_id` and emits `pane_id`,
 `workspace_id`, and the current `scroll` metrics whenever Herdr observes a
@@ -848,6 +848,11 @@ herdr pane read w1:p1 --source detection
 
 `recent-unwrapped` is useful for logs because it ignores soft wrapping.
 `detection` returns the bottom-buffer snapshot used by agent screen detection.
+Raw `pane.read` responses include the pane output `revision`. Protocol clients
+can pass `min_revision`; when the pane has not advanced beyond that revision,
+Herdr returns the current `revision` with an empty `text` field instead of
+walking and serializing terminal rows. Subscribe to `pane.output_changed` to
+learn the next pane revision without polling.
 
 Use `pane.attach` when a protocol client needs live terminal bytes without
 polling `pane.read`:
@@ -869,9 +874,9 @@ Later lines are pushed byte chunks:
 ```
 
 `data` is base64-encoded raw PTY output. `seq` is monotonic per attachment.
-If the client falls far enough behind that chunks are dropped, Herdr closes the
-stream so the client can reattach and recover from a fresh `pane.read`
-snapshot.
+Herdr keeps a bounded per-attachment message queue and byte budget. If the
+client falls behind far enough to exhaust that budget, Herdr closes the stream
+so the client can reattach and recover from a fresh `pane.read` snapshot.
 
 ## Waiting for state
 

@@ -2761,6 +2761,14 @@
                 "null"
               ]
             },
+            "min_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "pane_id": {
               "type": "string"
             },

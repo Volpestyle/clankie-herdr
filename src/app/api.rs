@@ -147,6 +147,22 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::PaneOutputChanged { pane_id, revision } = ev {
+            if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::PaneOutputChanged,
+                        data: crate::api::schema::EventData::PaneOutputChanged {
+                            pane_id: public_pane_id,
+                            workspace_id: self.public_workspace_id(ws_idx),
+                            revision,
+                        },
+                    });
+                }
+            }
+            return Vec::new();
+        }
+
         if let AppEvent::GitStatusRefreshed {
             results,
             cache_updates,

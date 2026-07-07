@@ -361,6 +361,10 @@ impl TerminalRuntime {
         self.0.visible_text()
     }
 
+    pub fn output_revision(&self) -> u64 {
+        self.0.output_revision()
+    }
+
     pub fn visible_ansi(&self) -> String {
         self.0.visible_ansi()
     }

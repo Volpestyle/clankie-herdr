@@ -2605,6 +2605,10 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::PaneOutputChanged { .. } => {
+                self.app.handle_internal_event(ev);
+                false
+            }
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
     }

@@ -14,6 +14,7 @@ use crate::api::schema::{
     PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason,
     PaneZoomResult, ResponseResult,
 };
+use crate::api::{PaneOutputChunk, PaneOutputStreamSender, PaneOutputStreamTrySendError};
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
 #[cfg(test)]
@@ -694,27 +695,35 @@ impl App {
                     return encode_error(id, "tab_not_found", format!("tab {tab_id} not found"));
                 };
                 if source_ws_idx == target_ws_idx && source_tab_idx == target_tab_idx {
-                    let Some(layout) = self.pane_layout_snapshot(source_ws_idx, source_tab_idx)
-                    else {
-                        return encode_error(
+                    let target_is_other_pane_in_same_tab = target_pane_id
+                        .as_deref()
+                        .and_then(|raw| self.parse_pane_id(raw))
+                        .is_some_and(|(pane_ws_idx, target_pane_id)| {
+                            pane_ws_idx == target_ws_idx && target_pane_id != source_pane_id
+                        });
+                    if !target_is_other_pane_in_same_tab {
+                        let Some(layout) = self.pane_layout_snapshot(source_ws_idx, source_tab_idx)
+                        else {
+                            return encode_error(
+                                id,
+                                "pane_layout_unavailable",
+                                "pane layout unavailable",
+                            );
+                        };
+                        let Some(pane) = self.pane_info(source_ws_idx, source_pane_id) else {
+                            return encode_error(id, "pane_not_found", "source pane not found");
+                        };
+                        return encode_unchanged_pane_move(
                             id,
-                            "pane_layout_unavailable",
-                            "pane layout unavailable",
+                            PaneMoveReason::SameTab,
+                            previous_pane_id,
+                            previous_workspace_id,
+                            previous_tab_id,
+                            pane,
+                            Some(layout.clone()),
+                            layout,
                         );
-                    };
-                    let Some(pane) = self.pane_info(source_ws_idx, source_pane_id) else {
-                        return encode_error(id, "pane_not_found", "source pane not found");
-                    };
-                    return encode_unchanged_pane_move(
-                        id,
-                        PaneMoveReason::SameTab,
-                        previous_pane_id,
-                        previous_workspace_id,
-                        previous_tab_id,
-                        pane,
-                        Some(layout.clone()),
-                        layout,
-                    );
+                    }
                 }
                 if self.state.workspaces[target_ws_idx].tabs[target_tab_idx].zoomed {
                     let Some(source_layout) =
@@ -1205,12 +1214,23 @@ impl App {
         else {
             return pane_not_found(id, &params.pane_id);
         };
-        let snapshot = crate::app::api_helpers::read_terminal_snapshot(
-            pane,
-            params.source,
-            params.format,
-            params.lines,
-        );
+        let revision = pane.output_revision();
+        let snapshot = if params
+            .min_revision
+            .is_some_and(|min_revision| revision <= min_revision)
+        {
+            crate::pane::TerminalReadSnapshot {
+                text: String::new(),
+                truncated: false,
+            }
+        } else {
+            crate::app::api_helpers::read_terminal_snapshot(
+                pane,
+                params.source,
+                params.format,
+                params.lines,
+            )
+        };
 
         encode_success(
             id,
@@ -1222,7 +1242,7 @@ impl App {
                     source: params.source,
                     format: params.format,
                     text: snapshot.text,
-                    revision: 0,
+                    revision,
                     truncated: snapshot.truncated,
                 },
             },
@@ -1233,7 +1253,7 @@ impl App {
         &mut self,
         id: String,
         params: PaneAttachParams,
-        stream_to: Option<std::sync::mpsc::Sender<crate::api::PaneOutputChunk>>,
+        stream_to: Option<PaneOutputStreamSender>,
     ) -> String {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
@@ -1256,14 +1276,19 @@ impl App {
         tokio::spawn(async move {
             loop {
                 match output_rx.recv().await {
-                    Ok(bytes) => {
-                        if stream_to
-                            .send(crate::api::PaneOutputChunk { bytes })
-                            .is_err()
-                        {
+                    Ok(bytes) => match stream_to.try_send(PaneOutputChunk { bytes }) {
+                        Ok(()) => {}
+                        Err(PaneOutputStreamTrySendError::Full) => {
+                            warn!(
+                                pane = pane_id.raw(),
+                                queued_bytes = stream_to.queued_bytes(),
+                                max_queued_bytes = stream_to.max_queued_bytes(),
+                                "pane attach stream queue full; closing byte stream"
+                            );
                             break;
                         }
-                    }
+                        Err(PaneOutputStreamTrySendError::Disconnected) => break,
+                    },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!(
                             pane = pane_id.raw(),
@@ -1978,7 +2003,7 @@ fn invalid_agent(id: String) -> String {
 mod tests {
     use super::*;
     use crate::{
-        api::schema::{ErrorResponse, SplitDirection, SuccessResponse},
+        api::schema::{ErrorResponse, ReadFormat, ReadSource, SplitDirection, SuccessResponse},
         config::Config,
         detect::{Agent, AgentState},
         workspace::Workspace,
@@ -2078,6 +2103,80 @@ mod tests {
     fn metadata_error_code(response: &str) -> String {
         let response: ErrorResponse = serde_json::from_str(response).unwrap();
         response.error.code
+    }
+
+    #[tokio::test]
+    async fn pane_read_returns_output_revision_and_short_circuits_unchanged_reads() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"");
+        runtime.test_process_pty_bytes(b"hello");
+        let revision = runtime.output_revision();
+        assert!(revision > 0);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let response = app.handle_pane_read(
+            "read".into(),
+            PaneReadParams {
+                pane_id: public_pane_id.clone(),
+                source: ReadSource::Visible,
+                lines: None,
+                min_revision: None,
+                format: ReadFormat::Text,
+                strip_ansi: true,
+                intent: crate::api::schema::ReadIntent::Interactive,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneRead { read } = success.result else {
+            panic!("expected pane read");
+        };
+        assert_eq!(read.text, "hello\n");
+        assert_eq!(read.revision, revision);
+
+        let response = app.handle_pane_read(
+            "read".into(),
+            PaneReadParams {
+                pane_id: public_pane_id,
+                source: ReadSource::Visible,
+                lines: None,
+                min_revision: Some(revision),
+                format: ReadFormat::Text,
+                strip_ansi: true,
+                intent: crate::api::schema::ReadIntent::Interactive,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneRead { read } = success.result else {
+            panic!("expected pane read");
+        };
+        assert_eq!(read.text, "");
+        assert_eq!(read.revision, revision);
+    }
+
+    #[test]
+    fn pane_output_changed_internal_event_emits_api_event() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        app.handle_internal_event(crate::events::AppEvent::PaneOutputChanged {
+            pane_id,
+            revision: 7,
+        });
+
+        let events = app.event_hub.events_after(0);
+        assert_eq!(events.len(), 1);
+        let envelope = &events[0].1;
+        assert_eq!(envelope.event, EventKind::PaneOutputChanged);
+        match &envelope.data {
+            EventData::PaneOutputChanged {
+                pane_id, revision, ..
+            } => {
+                assert_eq!(pane_id, &public_pane_id);
+                assert_eq!(*revision, 7);
+            }
+            other => panic!("expected pane output changed event, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2208,6 +2307,7 @@ mod tests {
                 pane_id: public_pane_id,
                 source: crate::api::schema::ReadSource::Recent,
                 lines: Some(2),
+                min_revision: None,
                 format: crate::api::schema::ReadFormat::Text,
                 strip_ansi: true,
                 intent: crate::api::schema::ReadIntent::Interactive,
@@ -3232,6 +3332,48 @@ mod tests {
         };
         assert!(!move_result.changed);
         assert_eq!(move_result.reason, Some(PaneMoveReason::SameTab));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn api_pane_move_same_tab_with_explicit_target_retiles_existing_pane() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let target = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        seed_terminal_states(&mut app);
+        let source_public = app.public_pane_id(0, source).unwrap();
+        let target_public = app.public_pane_id(0, target).unwrap();
+        let source_tab = app.public_tab_id(0, 0).unwrap();
+        let source_terminal = app.state.workspaces[0].tabs[0]
+            .terminal_id(source)
+            .cloned()
+            .unwrap();
+
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public.clone(),
+                destination: PaneMoveDestination::Tab {
+                    tab_id: source_tab.clone(),
+                    target_pane_id: Some(target_public),
+                    split: SplitDirection::Down,
+                    ratio: Some(0.25),
+                },
+                focus: true,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        assert!(move_result.changed);
+        assert_eq!(move_result.reason, None);
+        assert_eq!(move_result.previous_pane_id, source_public);
+        assert_eq!(move_result.previous_tab_id, source_tab);
+        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(move_result.target_layout.panes.len(), 2);
+        assert_eq!(move_result.focused_pane_id, move_result.pane.pane_id);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
     }
 

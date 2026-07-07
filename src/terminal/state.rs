@@ -77,6 +77,22 @@ struct ManagedAgent {
     phase: ManagedAgentPhase,
 }
 
+type CurrentSessionIdentity = (
+    String,
+    String,
+    crate::agent_resume::AgentSessionRefKind,
+    String,
+);
+
+type CurrentSessionApiIdentity = (
+    String,
+    String,
+    crate::agent_resume::AgentSessionRefKind,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveStateChange {
     pub previous_agent_label: Option<String>,
@@ -1300,14 +1316,7 @@ impl TerminalState {
             })
     }
 
-    fn current_session_identity_for_persistence(
-        &self,
-    ) -> Option<(
-        String,
-        String,
-        crate::agent_resume::AgentSessionRefKind,
-        String,
-    )> {
+    fn current_session_identity_for_persistence(&self) -> Option<CurrentSessionIdentity> {
         if let Some(authority) = self.hook_authority.as_ref() {
             if let Some(session_ref) = authority.session_ref.as_ref() {
                 return Some((
@@ -1328,16 +1337,7 @@ impl TerminalState {
         })
     }
 
-    fn current_session_identity_for_api(
-        &self,
-    ) -> Option<(
-        String,
-        String,
-        crate::agent_resume::AgentSessionRefKind,
-        String,
-        Option<String>,
-        Option<String>,
-    )> {
+    fn current_session_identity_for_api(&self) -> Option<CurrentSessionApiIdentity> {
         if let Some(authority) = self.hook_authority.as_ref() {
             if let Some(session_ref) = authority.session_ref.as_ref() {
                 return Some((

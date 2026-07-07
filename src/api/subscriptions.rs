@@ -43,6 +43,9 @@ pub(super) struct ActiveOutputMatchedSubscription {
     regex: Option<Regex>,
     strip_ansi: bool,
     currently_matching: bool,
+    initial_check_pending: bool,
+    last_revision: Option<u64>,
+    last_sequence: u64,
     request_prefix: String,
 }
 
@@ -186,19 +189,23 @@ impl ActiveSubscription {
                     &pane_id,
                     source,
                     lines,
+                    None,
                     strip_ansi,
                     api_tx,
                 );
-                probe?;
+                let probe = probe?;
 
                 Ok(Self::OutputMatched(ActiveOutputMatchedSubscription {
-                    pane_id,
+                    pane_id: probe.pane_id,
                     source,
                     lines,
                     matcher: r#match,
                     regex,
                     strip_ansi,
                     currently_matching: false,
+                    initial_check_pending: true,
+                    last_revision: None,
+                    last_sequence: event_hub.current_sequence(),
                     request_prefix: format!("{request_id}:sub:{index}"),
                 }))
             }
@@ -254,7 +261,7 @@ impl ActiveSubscription {
         match self {
             Self::Event(subscription) => subscription.poll(event_hub),
             Self::OutputMatched(subscription) => {
-                serde_json::to_value(subscription.poll(api_tx)?).ok()
+                serde_json::to_value(subscription.poll(api_tx, event_hub)?).ok()
             }
             Self::AgentStatusChanged(subscription) => {
                 serde_json::to_value(subscription.poll(api_tx, event_hub)?).ok()
@@ -292,16 +299,45 @@ impl ActiveEventSubscription {
 }
 
 impl ActiveOutputMatchedSubscription {
-    fn poll(&mut self, api_tx: &ApiRequestSender) -> Option<SubscriptionEventEnvelope> {
+    fn poll(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+    ) -> Option<SubscriptionEventEnvelope> {
+        let mut should_read = std::mem::take(&mut self.initial_check_pending);
+        for (sequence, event) in event_hub.events_after(self.last_sequence) {
+            self.last_sequence = sequence;
+            if event.event != crate::api::schema::EventKind::PaneOutputChanged {
+                continue;
+            }
+            let crate::api::schema::EventData::PaneOutputChanged { pane_id, .. } = event.data
+            else {
+                continue;
+            };
+            if pane_id == self.pane_id {
+                should_read = true;
+            }
+        }
+
+        if !should_read {
+            return None;
+        }
+
+        let min_revision = self.last_revision;
         let read = pane_read(
             format!("{}:read", self.request_prefix),
             &self.pane_id,
             output_match_read_source(&self.source),
             self.lines,
+            min_revision,
             self.strip_ansi,
             api_tx,
         )
         .ok()?;
+        if min_revision.is_some_and(|revision| read.revision <= revision) && read.text.is_empty() {
+            return None;
+        }
+        self.last_revision = Some(read.revision);
 
         let matched_line = match_output(&read.text, &self.matcher, self.regex.as_ref());
         match matched_line {
@@ -495,6 +531,7 @@ fn pane_read(
     pane_id: &str,
     source: crate::api::schema::ReadSource,
     lines: Option<u32>,
+    min_revision: Option<u64>,
     strip_ansi: bool,
     api_tx: &ApiRequestSender,
 ) -> Result<crate::api::schema::PaneReadResult, ErrorResponse> {
@@ -505,6 +542,7 @@ fn pane_read(
                 pane_id: pane_id.to_string(),
                 source,
                 lines,
+                min_revision,
                 format: crate::api::schema::ReadFormat::Text,
                 strip_ansi,
                 intent: crate::api::schema::ReadIntent::Passive,
@@ -607,6 +645,17 @@ mod tests {
             event: EventKind::WorkspaceFocused,
             data: EventData::WorkspaceFocused {
                 workspace_id: workspace_id.into(),
+            },
+        }
+    }
+
+    fn output_changed_event(revision: u64) -> EventEnvelope {
+        EventEnvelope {
+            event: EventKind::PaneOutputChanged,
+            data: EventData::PaneOutputChanged {
+                pane_id: "pane_1".into(),
+                workspace_id: "workspace_1".into(),
+                revision,
             },
         }
     }
@@ -721,6 +770,73 @@ mod tests {
         assert_eq!(data.pane_id, "pane_1");
         assert_eq!(data.workspace_id, "workspace_1");
         assert_eq!(data.scroll, scrolled_back);
+    }
+
+    #[test]
+    fn output_matched_subscription_reads_only_after_output_change_event() {
+        let event_hub = EventHub::default();
+        let mut subscription = ActiveOutputMatchedSubscription {
+            pane_id: "pane_1".into(),
+            source: crate::api::schema::ReadSource::Visible,
+            lines: None,
+            matcher: crate::api::schema::OutputMatch::Substring {
+                value: "ready".into(),
+            },
+            regex: None,
+            strip_ansi: true,
+            currently_matching: false,
+            initial_check_pending: false,
+            last_revision: Some(1),
+            last_sequence: event_hub.current_sequence(),
+            request_prefix: "test".into(),
+        };
+
+        let (idle_tx, mut idle_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::api::ApiRequestMessage>();
+        assert!(subscription.poll(&idle_tx, &event_hub).is_none());
+        assert!(idle_rx.try_recv().is_err());
+
+        event_hub.push(output_changed_event(2));
+        let (api_tx, mut api_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::api::ApiRequestMessage>();
+        let responder = std::thread::spawn(move || {
+            let msg = api_rx.blocking_recv().expect("pane.read request");
+            let Method::PaneRead(params) = msg.request.method else {
+                panic!("expected pane.read");
+            };
+            assert_eq!(params.pane_id, "pane_1");
+            assert_eq!(params.min_revision, Some(1));
+            msg.respond_to
+                .send(
+                    serde_json::to_string(&crate::api::schema::SuccessResponse {
+                        id: msg.request.id,
+                        result: crate::api::schema::ResponseResult::PaneRead {
+                            read: crate::api::schema::PaneReadResult {
+                                pane_id: "pane_1".into(),
+                                workspace_id: "workspace_1".into(),
+                                tab_id: "tab_1".into(),
+                                source: crate::api::schema::ReadSource::Visible,
+                                format: crate::api::schema::ReadFormat::Text,
+                                text: "ready\n".into(),
+                                revision: 2,
+                                truncated: false,
+                            },
+                        },
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+        });
+
+        let event = subscription
+            .poll(&api_tx, &event_hub)
+            .expect("matched output event");
+        let SubscriptionEventData::PaneOutputMatched(data) = event.data else {
+            panic!("wrong event data");
+        };
+        assert_eq!(data.matched_line, "ready");
+        assert_eq!(subscription.last_revision, Some(2));
+        responder.join().unwrap();
     }
 
     #[test]

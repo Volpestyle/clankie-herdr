@@ -1972,12 +1972,22 @@ impl PaneRuntime {
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
                 content_seq.fetch_add(1, Ordering::AcqRel);
-                let _ = output_tx.send(Bytes::copy_from_slice(bytes));
+                if output_tx.receiver_count() > 0 {
+                    let _ = output_tx.send(Bytes::copy_from_slice(bytes));
+                }
                 let shell_pid = child_pid.load(Ordering::Acquire);
+                let previous_output_revision = terminal.output_revision();
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
+                let output_revision = terminal.output_revision();
+                if output_revision != previous_output_revision {
+                    let _ = read_events.try_send(AppEvent::PaneOutputChanged {
+                        pane_id,
+                        revision: output_revision,
+                    });
+                }
                 observe_detection_content_change(bytes, &detection_content_seq);
                 let title_requested =
                     result.terminal_title_changed && render_dirty.request_terminal_title(pane_id);
@@ -2145,12 +2155,22 @@ impl PaneRuntime {
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
                 content_seq.fetch_add(1, Ordering::AcqRel);
-                let _ = output_tx.send(Bytes::copy_from_slice(bytes));
+                if output_tx.receiver_count() > 0 {
+                    let _ = output_tx.send(Bytes::copy_from_slice(bytes));
+                }
                 let shell_pid = child_pid.load(Ordering::Acquire);
+                let previous_output_revision = terminal.output_revision();
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
                 publish_terminal_bells(pane_id, result.terminal_bells, &events);
+                let output_revision = terminal.output_revision();
+                if output_revision != previous_output_revision {
+                    let _ = events.try_send(AppEvent::PaneOutputChanged {
+                        pane_id,
+                        revision: output_revision,
+                    });
+                }
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
                 }
@@ -2795,6 +2815,10 @@ impl PaneRuntime {
 
     pub fn visible_text(&self) -> String {
         self.terminal.visible_text()
+    }
+
+    pub fn output_revision(&self) -> u64 {
+        self.terminal.output_revision()
     }
 
     pub fn visible_ansi(&self) -> String {
