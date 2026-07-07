@@ -1,84 +1,162 @@
-# herdr
-
-
-<p align="center">
-  <img src="assets/logo.png" alt="herdr" width="100" />
-</p>
+# clankie-herdr — Clankie's terminal multiplexer
 
 <p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="https://herdr.dev/docs/quick-start/">quick start</a> · <a href="https://herdr.dev/docs/">docs</a>
+  <img src="assets/logo.png" alt="clankie-herdr" width="100" />
 </p>
 
-<p align="center">
-  English · <a href="README.zh-CN.md">简体中文</a>
-</p>
+`clankie-herdr` is Clankie's bundled terminal multiplexer: the terminal runtime that
+runs every Clankie worker as a **named, visible, steerable pane** (`clankie:<slug>`)
+you can watch go blocked → working → done, attach to, and drive — from the desk
+or from the iOS window. It is the component behind Clankie's "visible by design"
+promise: no hidden background agents, every worker on one terminal multiplexer that the
+always-on brain and the phone see the same way.
+
+Under the hood it is a patch-stack fork of [Herdr](https://herdr.dev), the
+terminal-based agent runtime by
+[@ogulcancelik](https://github.com/ogulcancelik/herdr). Clankie carries a thin
+stack of provider-specific mux patches on top of upstream and vendors the fork
+in this repository alongside the Clankie monorepo so the mux API tracks the
+agent and iOS surfaces that consume it. From the product's seat it is simply
+Clankie's terminal multiplexer; the fork is how it is maintained, not what it is.
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-666666?labelColor=333333" alt="Apache 2.0 license" /></a>
-  <a href="https://github.com/herdrdev/herdr/releases"><img src="https://img.shields.io/github/downloads/herdrdev/herdr/total?labelColor=333333&color=666666" alt="total GitHub release downloads" /></a>
-  <a href="https://github.com/herdrdev/herdr/stargazers"><img src="https://img.shields.io/github/stars/herdrdev/herdr?labelColor=333333&color=666666&logo=github" alt="GitHub stars" /></a>
-  <a href="https://github.com/herdrdev/herdr/releases/latest"><img src="https://img.shields.io/github/v/release/herdrdev/herdr?label=release&labelColor=333333&color=666666" alt="latest stable release" /></a>
-  <a href="https://formulae.brew.sh/formula/herdr"><img src="https://img.shields.io/homebrew/v/herdr?label=homebrew&labelColor=333333&color=666666" alt="Homebrew version" /></a>
-  <a href="https://x.com/herdrdev"><img src="https://img.shields.io/badge/follow-%40herdrdev-000000?logo=x&logoColor=white" alt="follow @herdrdev on X" /></a>
+  <a href="https://herdr.dev">upstream Herdr</a> · <a href="https://herdr.dev/docs/">runtime docs</a>
 </p>
 
----
+## Role in the system
 
-https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
+- **Clankie is the lead agent; `clankie-herdr` is the terminal multiplexer its workers run on.**
+  Clankie plans, spawns, watches, unblocks, and harvests; the terminal multiplexer gives each
+  worker a real terminal, rolls fleet state up at a glance, and keeps panes alive
+  across detach.
+- **Product boundary.** Clankie product semantics — orchestration edges,
+  transcript policy, pane chat, work tracking, iOS behavior — stay in
+  the Clankie repository. This package carries only terminal-multiplexer
+  mechanics and the fork-side capabilities those semantics need.
 
-**the runtime your coding agents live on.**
+## The terminal multiplexer engine
 
-- **always running** — herdr is a background server; the terminals live inside it. close the lid, drop the network, or restart the machine; agents keep working and sessions come back. reattach from any terminal, or over ssh.
-- **never hunt for the stuck one** — every pane is marked working, blocked, or idle. when an agent stops and needs an answer, herdr says so.
-- **agent-native** — agents drive herdr through the cli and socket api: they can spawn panes, prompt each other, and wait until another agent is genuinely blocked. [agent skill →](https://herdr.dev/docs/agent-skill/)
-- **runs what you already run** — claude code, codex, cursor, opencode, grok and the rest. herdr doesn't wrap or replace them; it owns their terminals.
-- **keyboard and mouse, both first-class** — tmux-style prefix keys *and* click, drag, split. pick per moment, not per tool.
-- **plugins** — extend panes and workflows. [browse the marketplace →](https://herdr.dev/plugins/)
-- **one rust binary, no electron** — runs in whatever terminal you already use.
+`clankie-herdr` inherits Herdr's runtime, so everything Herdr gives you is what
+Clankie's terminal multiplexer is built on:
 
----
+- **a real terminal per agent** — each worker's own screen, not an app's
+  imitation, so even full-screen TUIs render right.
+- **agent state at a glance** — every pane rolls up to 🔴 blocked, 🟡 working,
+  🔵 done, or 🟢 idle. Detection works out of the box with process-name matching
+  plus terminal-output heuristics; zero config, no hooks required.
+- **workspaces, tabs, panes** — organize by repo or folder, click, drag, split;
+  mouse-native throughout.
+- **nothing dies on detach** — a background server keeps panes and agents alive;
+  detach and reattach from any terminal, including the phone over the relay.
+- **runs anywhere** — a single ~10MB Rust binary, Linux and macOS (Windows beta),
+  no dependencies, inside the terminal you already use.
+- **scriptable** — a local Unix socket API and CLI that agents drive to create
+  workspaces, split or zoom panes, spawn helpers, read output, and subscribe to
+  state changes instead of polling.
 
-## install
+## How Clankie drives it
+
+Clankie reaches the terminal multiplexer over that local socket rather than by scraping a screen:
+it creates panes, spawns workers, reads their output, and subscribes to state
+changes. The agent-facing mechanics live in the bundled
+[`skills/herdr/SKILL.md`](./skills/herdr/SKILL.md)
+and the [socket API docs](https://herdr.dev/docs/socket-api/). Inside Clankie,
+spawns funnel through the agent's transcript-run seam so every worker lands as a
+named `clankie:<slug>` pane on Herdr — see `clankie-agent` for that layer.
+
+## Supported workers
+
+Clankie runs coding harnesses as workers on Herdr; detection classifies
+each pane's state without per-harness hooks.
+
+| agent | idle / done | working | blocked |
+|-------|-------------|---------|---------|
+| [pi](https://pi.dev) | ✓ | ✓ | partial |
+| [claude code](https://docs.anthropic.com/en/docs/claude-code) | ✓ | ✓ | ✓ |
+| [codex](https://github.com/openai/codex) | ✓ | ✓ | ✓ |
+| [droid](https://factory.ai) | ✓ | ✓ | ✓ |
+| [amp](https://ampcode.com) | ✓ | ✓ | ✓ |
+| [opencode](https://github.com/anomalyco/opencode) | ✓ | ✓ | ✓ |
+| [grok cli](https://x.ai/grok) | ✓ | ✓ | ✓ |
+| [hermes agent](https://github.com/NousResearch/hermes-agent) | ✓ | ✓ | ✓ |
+| [kilo code cli](https://kilo.ai/) | ✓ | ✓ | ✓ |
+| [devin cli](https://docs.devin.ai/cli) | ✓ | ✓ | ✓ |
+| cursor agent | ✓ | ✓ | ✓ |
+| antigravity cli | ✓ | ✓ | ✓ |
+| kimi code cli | ✓ | ✓ | ✓ |
+| [github copilot cli](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
+| [qodercli](https://qoder.com/cli) | ✓ | ✓ | ✓ |
+| [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
+
+Any other agent still works; Herdr runs it as a terminal multiplexer, and
+custom integrations can report labels and state over the socket API. Detected but
+not fully tested: gemini cli, cline. Detection tuning is evidence-based — the
+process and hot-reload loop is in [`AGENTS.md`](./AGENTS.md).
+
+## Fork and maintenance
+
+`clankie-herdr` is maintained as a **linear patch stack rebased onto upstream**,
+never a merge fork:
+
+- `master` mirrors upstream `ogulcancelik/herdr` and is never committed to
+  directly.
+- `patch/NN-*` branches each carry one reviewable, stacked patch, in `NN` order.
+- `fork` is the stack tip — the branch built, installed, and run as Clankie's
+  terminal multiplexer.
+- `upstream` is fetch-only.
+
+Rebase, verify, build, install, and push mechanics live in the
+`herdr-fork-rebase` host skill; do not reinvent them. Carried patches expose
+the mux capabilities Clankie needs (request/render serialization, multi-client
+retained-render gating, pane/session metadata, and output-change eventing) and
+are kept thin so they stay rebasable against upstream. Upstreaming a
+broadly-applicable fix stays useful but is no longer required before Clankie can
+depend on a fork-carried capability.
+
+## Build
+
+The fork source lives in this package; build the terminal-multiplexer binary from here.
 
 ```bash
-curl -fsSL https://herdr.dev/install.sh | sh
-```
-
-or `brew install herdr` · `mise use -g herdr` · windows: `powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"` · [endpoint-protected Windows](https://herdr.dev/docs/windows-beta/) · [binaries](https://github.com/herdrdev/herdr/releases)
-
-then start it where the work lives:
-
-```bash
-herdr
-```
-
-run your agents, split panes, walk away. `ctrl+b q` detaches, `herdr` reattaches. [quick start →](https://herdr.dev/docs/quick-start/)
-
-## docs
-
-everything lives at [herdr.dev/docs](https://herdr.dev/docs/): [quick start](https://herdr.dev/docs/quick-start/) · [concepts](https://herdr.dev/docs/concepts/) · [supported agents](https://herdr.dev/docs/agents/) · [keyboard](https://herdr.dev/docs/keyboard/) · [configuration](https://herdr.dev/docs/configuration/) · [session state](https://herdr.dev/docs/session-state/) · [remote](https://herdr.dev/docs/persistence-remote/) · [integrations](https://herdr.dev/docs/integrations/) · [plugins](https://herdr.dev/docs/plugins/) · [socket api](https://herdr.dev/docs/socket-api/)
-
-## thanks
-
-every past sponsor and backer is listed in [SPONSORS.md](./SPONSORS.md) — thank you 🐑
-
-enterprise / partnership: hey@herdr.dev
-
-## agent instructions
-
-if you are an ai agent helping with this repository, read [`AGENTS.md`](./AGENTS.md) before making changes and read [`CONTRIBUTING.md`](./CONTRIBUTING.md) before opening issues or PRs.
-
-## development
-
-```bash
-git clone https://github.com/herdrdev/herdr
-cd herdr
 cargo build --release
 
 just test        # unit tests
 just check       # formatting, tests, and maintenance checks
 ```
 
-## license
+The build produces both the upstream-compatible `herdr` binary and Clankie's
+`clankie-herdr` binary from the same source. When testing a fresh build from
+inside an existing mux session, clear the inherited Herdr socket overrides so
+it talks to the debug server — see [`AGENTS.md`](./AGENTS.md) for that and the
+full fork-work rules.
 
-Herdr is licensed under the [Apache License 2.0](LICENSE).
+## Underlying runtime docs
+
+These describe the upstream Herdr runtime this fork builds on and remain the
+reference for terminal-multiplexer mechanics:
+
+- [concepts](https://herdr.dev/docs/concepts/): server and client, workspaces,
+  tabs, and panes
+- [session state](https://herdr.dev/docs/session-state/): detach, restart
+  restore, agent restore, and live handoff
+- [configuration](https://herdr.dev/docs/configuration/): keybindings, copy mode,
+  themes, notifications, environment variables
+- [integrations](https://herdr.dev/docs/integrations/): native session restore
+  and semantic state per agent
+- [socket api](https://herdr.dev/docs/socket-api/): socket protocol and CLI
+  reference
+- [`skills/herdr/SKILL.md`](./skills/herdr/SKILL.md): the reusable agent skill
+
+## Agent instructions
+
+If you are an AI agent working on this package, read [`AGENTS.md`](./AGENTS.md)
+before making changes — it is authoritative for fork work — and
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) before interacting with the upstream
+`ogulcancelik/herdr` repository.
+
+## Upstream and license
+
+`clankie-herdr` tracks [upstream Herdr](https://github.com/herdrdev/herdr) as its
+rebase source. Herdr and this fork are licensed under the
+[Apache License 2.0](LICENSE).
