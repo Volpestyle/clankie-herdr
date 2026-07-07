@@ -1,10 +1,23 @@
-# herdr
+# clankie-herdr
 
-Terminal based agent runtime for coding agents.
+`clankie-herdr` is Clankie's terminal multiplexer: the terminal-based agent runtime that
+runs every Clankie worker as a named, visible, steerable pane. It is a linear
+patch-stack fork of upstream Herdr
+([@ogulcancelik/herdr](https://github.com/ogulcancelik/herdr)), vendored in the
+Clankie monorepo so the mux API tracks the agent and iOS surfaces that consume
+it. From the product's seat it is simply Clankie's terminal multiplexer; this file stays
+authoritative for the fork-maintenance work underneath.
+
+Upstream Herdr's engineering authority is retained verbatim below — the runtime
+principles, detection discipline, vendored-patch rules, and code conventions are
+the real technical contract for editing this tree, fork or not. The Clankie Fork
+Model layers on top; it does not weaken them.
 
 ## Scope and Audience
 
-These instructions are layered.
+These instructions are layered. The Clankie Fork Model below is the default for
+day-to-day work in this checkout; the upstream maintainer and contributor layers
+govern interaction with `ogulcancelik/herdr` itself.
 
 - Unless a section explicitly says it is maintainer-only, local-machine-only, or
   external-contributor-only, treat it as universal project guidance.
@@ -20,6 +33,42 @@ These instructions are layered.
 - External contributor guardrail applies whenever the acting GitHub account is
   not `ogulcancelik`, the work is happening in a fork, or the account cannot be
   determined.
+
+## Clankie Fork Model
+
+`clankie-herdr` is maintained as a **linear patch stack rebased onto upstream**,
+never a merge fork:
+
+- `master` mirrors upstream `ogulcancelik/herdr` and is never committed to
+  directly.
+- `patch/NN-*` branches each carry one reviewable, stacked patch, in `NN` order.
+- `fork` is the stack tip — the branch built, installed, and run as Clankie's
+  terminal multiplexer.
+- `upstream` is fetch-only.
+
+Rebase, verify, build, install, and push mechanics live in the
+`herdr-fork-rebase` host skill; do not reinvent them here. Keep the stack thin
+and rebasable: carried patches expose the `StageProvider` capabilities Clankie needs
+(request/render serialization, multi-client retained-render gating, pane/session
+metadata, watch/presence eventing), and each must be tracked so it can be dropped
+when upstream absorbs it.
+
+**Product boundary (`clankie-agent` ADR-0017).** `StageProvider` is the product
+seam. Clankie consumes mux capabilities through provider-neutral interfaces and
+capability checks; Clankie product semantics — orchestration edges, transcript
+policy, pane chat, work tracking, iOS behavior — stay in `clankie-agent`, never in
+this tree. A fork patch that starts encoding product policy belongs on the other
+side of that boundary.
+
+**Upstreaming stays useful, not required.** A broadly-applicable fix should still
+go upstream via the Maintainer Workflow below, but Clankie may depend on a
+fork-carried capability before upstream takes it.
+
+**License.** Herdr is AGPL-3.0-or-later (dual-licensed upstream). Distributing or
+hosting a build of this fork is AGPL distribution and needs the license kept in
+sync with the published fork; personal or local use adds no distribution
+obligation. Shipping the terminal-multiplexer binary version-locked with the brain is
+**Proposed** in monorepo ADR-0005.
 
 ## Universal Project Rules
 
@@ -55,6 +104,11 @@ Examples:
 This section applies only when the acting GitHub account is `ogulcancelik` or
 Can explicitly says this is maintainer work. If the acting account is not
 `ogulcancelik`, skip this section and follow the external contributor guardrail.
+
+For `clankie-herdr` fork maintenance — the common case in this checkout — the
+primary workflow is the Clankie Fork Model above and the `herdr-fork-rebase` host
+skill, not this upstream flow. This section governs contributing a patch back to
+`ogulcancelik/herdr` itself.
 
 ### Multi-agent isolation
 
