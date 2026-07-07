@@ -525,6 +525,14 @@ where
         .collect()
 }
 
+fn command_name_from_args(args: &[String]) -> &str {
+    args.first()
+        .and_then(|arg| std::path::Path::new(arg).file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("herdr")
+}
+
 fn main() -> io::Result<()> {
     let raw_args: Vec<String> = match args_as_utf8(std::env::args_os()) {
         Ok(args) => args,
@@ -534,11 +542,12 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+    let command_name = command_name_from_args(&raw_args);
     let args = match session::configure_from_args(&raw_args) {
         Ok(args) => args,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run '{command_name} --help' for usage");
             std::process::exit(2);
         }
     };
@@ -546,7 +555,7 @@ fn main() -> io::Result<()> {
         Ok(parsed) => parsed,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run '{command_name} --help' for usage");
             std::process::exit(2);
         }
     };
@@ -561,7 +570,7 @@ fn main() -> io::Result<()> {
         })
     {
         eprintln!("error: --remote can only be used with the default launch command");
-        eprintln!("run 'herdr --help' for usage");
+        eprintln!("run '{command_name} --help' for usage");
         std::process::exit(2);
     }
 
@@ -605,7 +614,7 @@ fn main() -> io::Result<()> {
             }
             Err(err) => {
                 eprintln!("{err}");
-                eprintln!("usage: herdr update [--handoff]");
+                eprintln!("usage: {command_name} update [--handoff]");
                 std::process::exit(2);
             }
         };
@@ -624,98 +633,101 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         platform::begin_cli_output();
-        println!("herdr — terminal workspace manager for AI coding agents");
+        println!("{command_name} — terminal workspace manager for AI coding agents");
         println!();
-        println!("Usage: herdr [options]");
-        println!("       herdr --session <name> [options]");
-        println!("       herdr --remote <ssh-target> [--session <name>]");
-        println!("       herdr session attach <name>");
-        println!("       herdr completion zsh");
-        println!("       herdr update [--handoff]");
-        println!("       herdr channel set <stable|preview>");
-        println!("       herdr server stop");
-        println!("       herdr server reload-config");
-        println!("       herdr api <subcommand> ...");
-        println!("       herdr completion <shell>");
-        println!("       herdr config <subcommand> ...");
-        println!("       herdr channel <subcommand> ...");
-        println!("       herdr workspace <subcommand> ...");
-        println!("       herdr worktree <subcommand> ...");
-        println!("       herdr tab <subcommand> ...");
-        println!("       herdr notification <subcommand> ...");
-        println!("       herdr agent <subcommand> ...");
-        println!("       herdr pane <subcommand> ...");
-        println!("       herdr session <subcommand> ...");
-        println!("       herdr integration <subcommand> ...");
+        println!("Usage: {command_name} [options]");
+        println!("       {command_name} --session <name> [options]");
+        println!("       {command_name} --remote <ssh-target> [--session <name>]");
+        println!("       {command_name} session attach <name>");
+        println!("       {command_name} completion zsh");
+        println!("       {command_name} update [--handoff]");
+        println!("       {command_name} channel set <stable|preview>");
+        println!("       {command_name} server stop");
+        println!("       {command_name} server reload-config");
+        println!("       {command_name} api <subcommand> ...");
+        println!("       {command_name} completion <shell>");
+        println!("       {command_name} config <subcommand> ...");
+        println!("       {command_name} channel <subcommand> ...");
+        println!("       {command_name} workspace <subcommand> ...");
+        println!("       {command_name} worktree <subcommand> ...");
+        println!("       {command_name} tab <subcommand> ...");
+        println!("       {command_name} notification <subcommand> ...");
+        println!("       {command_name} agent <subcommand> ...");
+        println!("       {command_name} pane <subcommand> ...");
+        println!("       {command_name} wait <subcommand> ...");
+        println!("       {command_name} session <subcommand> ...");
+        println!("       {command_name} integration <subcommand> ...");
         println!();
         println!("Common commands:");
-        for (command, description) in [
-            ("herdr", "Launch or attach to the persistent session"),
+        for (suffix, description) in [
+            ("", "Launch or attach to the persistent session"),
             (
-                "herdr status [server|client]",
+                " status [server|client]",
                 "Show local client and running server status",
             ),
-            ("herdr update", "Download and install the latest version"),
-            ("herdr completion zsh", "Generate shell completions for zsh"),
+            (" update", "Download and install the latest version"),
+            (" completion zsh", "Generate shell completions for zsh"),
+            (" server stop", "Stop the running server via the API socket"),
             (
-                "herdr server stop",
-                "Stop the running server via the API socket",
-            ),
-            (
-                "herdr channel set <stable|preview>",
+                " channel set <stable|preview>",
                 "Choose the stable or preview update channel",
             ),
             (
-                "herdr server reload-config",
+                " server reload-config",
                 "Reload config.toml in the running server",
             ),
             (
-                "herdr config reset-keys",
+                " config reset-keys",
                 "Back up config.toml and remove custom keybindings",
             ),
             (
-                "herdr channel <subcommand>",
+                " channel <subcommand>",
                 "Manage the stable or preview update channel",
             ),
             (
-                "herdr api <subcommand>",
+                " api <subcommand>",
                 "Inspect socket API metadata and live runtime state",
             ),
             (
-                "herdr workspace <subcommand>",
+                " workspace <subcommand>",
                 "Workspace helpers over the socket API",
             ),
             (
-                "herdr worktree <subcommand>",
+                " worktree <subcommand>",
                 "Git worktree helpers over the socket API",
             ),
-            ("herdr tab <subcommand>", "Tab helpers over the socket API"),
+            (" tab <subcommand>", "Tab helpers over the socket API"),
             (
-                "herdr notification <subcommand>",
+                " notification <subcommand>",
                 "Notification helpers over the socket API",
             ),
             (
-                "herdr agent <subcommand>",
+                " agent <subcommand>",
                 "Agent/terminal helpers over the socket API",
             ),
             (
-                "herdr pane <subcommand>",
+                " pane <subcommand>",
                 "Pane control helpers over the socket API",
             ),
             (
-                "herdr session <subcommand>",
-                "Manage named persistent sessions",
+                " wait <subcommand>",
+                "Blocking wait helpers over the socket API",
             ),
+            (" session <subcommand>", "Manage named persistent sessions"),
             (
-                "herdr integration <subcommand>",
+                " integration <subcommand>",
                 "Manage built-in agent integrations",
             ),
         ] {
+            let command = format!("{command_name}{suffix}");
             println!("  {command:<32} {description}");
         }
         println!();
         println!("Advanced commands:");
-        println!("  {:<32} Run as headless server", "herdr server");
+        println!(
+            "  {:<32} Run as headless server",
+            format!("{command_name} server")
+        );
         println!();
         println!("Options:");
         println!("  --no-session        Run monolithically (no server/client, escape hatch)");
@@ -740,7 +752,7 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         platform::begin_cli_output();
-        println!("herdr {}", crate::build_info::version());
+        println!("{command_name} {}", crate::build_info::version());
         return Ok(());
     }
 
@@ -773,7 +785,7 @@ fn main() -> io::Result<()> {
         let arg_name = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
         if arg.starts_with('-') && !known_flags.contains(&arg_name) {
             eprintln!("unknown option: {arg}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run '{command_name} --help' for usage");
             std::process::exit(2);
         }
         if !arg.starts_with('-')
@@ -794,7 +806,7 @@ fn main() -> io::Result<()> {
             .contains(&arg.as_str())
         {
             eprintln!("unknown command: {arg}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run '{command_name} --help' for usage");
             std::process::exit(2);
         }
     }
@@ -818,7 +830,7 @@ fn main() -> io::Result<()> {
     // Check if a server is running, spawn one if needed, then attach as client.
     if !no_session {
         if let Err(err) = server::autodetect::auto_detect_launch() {
-            eprintln!("herdr: {err}");
+            eprintln!("{command_name}: {err}");
             std::process::exit(1);
         }
         return Ok(());

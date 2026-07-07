@@ -20,6 +20,14 @@ include = [
     "Cargo.toml",
 ]
 
+[[bin]]
+name = "herdr"
+path = "src/main.rs"
+
+[[bin]]
+name = "clankie-herdr"
+path = "src/bin/clankie-herdr.rs"
+
 [dependencies]
 base64 = "0.22.1"
 bincode = { version = "2", features = ["serde"] }
