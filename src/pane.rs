@@ -1746,10 +1746,20 @@ impl PaneRuntime {
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
-                let _ = output_tx.send(Bytes::copy_from_slice(bytes));
+                if output_tx.receiver_count() > 0 {
+                    let _ = output_tx.send(Bytes::copy_from_slice(bytes));
+                }
                 let shell_pid = child_pid.load(Ordering::Acquire);
+                let previous_output_revision = terminal.output_revision();
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
+                let output_revision = terminal.output_revision();
+                if output_revision != previous_output_revision {
+                    let _ = read_events.try_send(AppEvent::PaneOutputChanged {
+                        pane_id,
+                        revision: output_revision,
+                    });
+                }
                 observe_detection_content_change(bytes, &detection_content_seq);
                 if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                     render_notify.notify_one();
@@ -1908,10 +1918,20 @@ impl PaneRuntime {
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
-                let _ = output_tx.send(Bytes::copy_from_slice(bytes));
+                if output_tx.receiver_count() > 0 {
+                    let _ = output_tx.send(Bytes::copy_from_slice(bytes));
+                }
                 let shell_pid = child_pid.load(Ordering::Acquire);
+                let previous_output_revision = terminal.output_revision();
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
+                let output_revision = terminal.output_revision();
+                if output_revision != previous_output_revision {
+                    let _ = events.try_send(AppEvent::PaneOutputChanged {
+                        pane_id,
+                        revision: output_revision,
+                    });
+                }
                 observe_detection_content_change(bytes, &detection_content_seq);
                 if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                     render_notify.notify_one();
@@ -2447,6 +2467,10 @@ impl PaneRuntime {
 
     pub fn visible_text(&self) -> String {
         self.terminal.visible_text()
+    }
+
+    pub fn output_revision(&self) -> u64 {
+        self.terminal.output_revision()
     }
 
     pub fn visible_ansi(&self) -> String {

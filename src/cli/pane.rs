@@ -512,6 +512,7 @@ fn pane_read(args: &[String]) -> std::io::Result<i32> {
             pane_id,
             source,
             lines,
+            min_revision: None,
             format,
             strip_ansi,
         }),

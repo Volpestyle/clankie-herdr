@@ -18,7 +18,10 @@ use crate::api::schema::{
 };
 use crate::api::subscriptions::ActiveSubscription;
 use crate::api::wait::{wait_for_event, wait_for_output};
-use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
+use crate::api::{
+    pane_output_stream_channel, request_changes_ui, socket_path, ApiRequestMessage,
+    ApiRequestSender, EventHub,
+};
 use crate::ipc::{
     bind_local_listener, is_connection_closed_error, local_stream_peer_closed,
     remove_socket_file_if_owned, socket_file_identity, LocalStream, SocketFileIdentity,
@@ -27,6 +30,8 @@ use crate::ipc::{
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
 pub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const PANE_ATTACH_STREAM_QUEUE_MESSAGES: usize = 1024;
+const PANE_ATTACH_STREAM_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Poll interval for the initial-request fallback path on transports without
 /// receive timeouts. Kept far below `CONNECTION_POLL_INTERVAL` because this
@@ -598,7 +603,8 @@ fn stream_subscriptions(
                 }
             }
         }
-        std::thread::sleep(CONNECTION_POLL_INTERVAL);
+        let sequence = event_hub.current_sequence();
+        event_hub.wait_for_change_after(sequence, CONNECTION_POLL_INTERVAL);
     }
 }
 
@@ -611,7 +617,10 @@ fn stream_pane_attach(
 ) -> std::io::Result<()> {
     let pane_id = params.pane_id.clone();
     let (respond_to, response_rx) = std_mpsc::channel();
-    let (stream_tx, stream_rx) = std_mpsc::channel();
+    let (stream_tx, stream_rx) = pane_output_stream_channel(
+        PANE_ATTACH_STREAM_QUEUE_MESSAGES,
+        PANE_ATTACH_STREAM_QUEUE_BYTES,
+    );
 
     if let Err(err) = api_tx.send(ApiRequestMessage {
         request: Request {
@@ -1046,7 +1055,7 @@ mod tests {
                 )
                 .unwrap();
             stream_to
-                .send(crate::api::PaneOutputChunk {
+                .try_send(crate::api::PaneOutputChunk {
                     bytes: bytes::Bytes::from_static(b"hi"),
                 })
                 .unwrap();

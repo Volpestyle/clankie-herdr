@@ -213,6 +213,10 @@ impl PaneTerminal {
         self.ghostty.visible_text()
     }
 
+    pub fn output_revision(&self) -> u64 {
+        self.ghostty.output_revision()
+    }
+
     pub fn visible_ansi(&self) -> String {
         self.ghostty.visible_ansi()
     }
@@ -1123,6 +1127,14 @@ impl GhosttyPaneTerminal {
             .lock()
             .ok()
             .and_then(|core| ghostty_visible_text(&core).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn output_revision(&self) -> u64 {
+        self.core
+            .lock()
+            .ok()
+            .map(|core| core.output_revision)
             .unwrap_or_default()
     }
 
