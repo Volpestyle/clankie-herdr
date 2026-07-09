@@ -2559,10 +2559,15 @@ impl HeadlessServer {
                     ..
                 }) = self.clients.get(&client_id)
                 {
+                    let attached_terminal_id = self.terminal_id_by_string(terminal_id);
                     if let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) {
                         if let Err(err) = apply_terminal_attach_input(runtime, data) {
                             warn!(client_id, terminal_id = %terminal_id, err = %err);
                         }
+                    }
+                    if let Some(attached_terminal_id) = attached_terminal_id {
+                        self.app
+                            .note_terminal_human_input(attached_terminal_id, Instant::now());
                     }
                     return true;
                 }
@@ -3791,6 +3796,14 @@ impl HeadlessServer {
             self.app.copy_feedback_deadline = None;
             self.app.state.copy_feedback = None;
             changed = true;
+        }
+
+        if self
+            .app
+            .next_send_queue_flush
+            .is_some_and(|deadline| now >= deadline)
+        {
+            changed |= self.app.flush_send_queues(now);
         }
 
         if self

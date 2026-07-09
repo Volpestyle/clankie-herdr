@@ -466,7 +466,8 @@ fn workspace_list_and_create_round_trip() {
             pane_id
         ),
     );
-    assert_eq!(send_text["result"]["type"], "ok");
+    assert_eq!(send_text["result"]["type"], "pane_send");
+    assert_eq!(send_text["result"]["delivered"], true);
 
     let send_enter = send_request(
         &socket_path,
@@ -475,7 +476,8 @@ fn workspace_list_and_create_round_trip() {
             pane_id
         ),
     );
-    assert_eq!(send_enter["result"]["type"], "ok");
+    assert_eq!(send_enter["result"]["type"], "pane_send");
+    assert_eq!(send_enter["result"]["delivered"], true);
 
     std::thread::sleep(Duration::from_millis(300));
 
@@ -515,7 +517,8 @@ fn workspace_list_and_create_round_trip() {
             pane_id
         ),
     );
-    assert_eq!(send_input["result"]["type"], "ok");
+    assert_eq!(send_input["result"]["type"], "pane_send");
+    assert_eq!(send_input["result"]["delivered"], true);
 
     let waited_delta = send_request(
         &socket_path,
@@ -723,7 +726,8 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
         })
         .to_string(),
     );
-    assert_eq!(send_text["result"]["type"], "ok");
+    assert_eq!(send_text["result"]["type"], "pane_send");
+    assert_eq!(send_text["result"]["delivered"], true);
     let send_enter = send_request(
         &socket_path,
         &format!(
@@ -731,7 +735,8 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
             pane_id
         ),
     );
-    assert_eq!(send_enter["result"]["type"], "ok");
+    assert_eq!(send_enter["result"]["type"], "pane_send");
+    assert_eq!(send_enter["result"]["delivered"], true);
     wait_for_path(&marker, Duration::from_secs(5));
 
     let foreground_pid: u32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
@@ -946,7 +951,8 @@ fn agent_methods_round_trip_over_socket() {
             terminal_id
         ),
     );
-    assert_eq!(sent["result"]["type"], "ok");
+    assert_eq!(sent["result"]["type"], "pane_send");
+    assert_eq!(sent["result"]["delivered"], true);
 
     let tab_created = send_request(
         &socket_path,
@@ -1167,7 +1173,8 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
             pane_id
         ),
     );
-    assert_eq!(send_pi["result"]["type"], "ok");
+    assert_eq!(send_pi["result"]["type"], "pane_send");
+    assert_eq!(send_pi["result"]["delivered"], true);
     let send_enter = send_request(
         &socket_path,
         &format!(
@@ -1175,7 +1182,8 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
             pane_id
         ),
     );
-    assert_eq!(send_enter["result"]["type"], "ok");
+    assert_eq!(send_enter["result"]["type"], "pane_send");
+    assert_eq!(send_enter["result"]["delivered"], true);
 
     let agent_detected = wait_for_event(&mut reader, "pane_agent_detected", Duration::from_secs(3));
     assert_eq!(agent_detected["data"]["pane_id"], pane_id);
@@ -1425,7 +1433,8 @@ fn pane_report_agent_updates_effective_state() {
             pane_id
         ),
     );
-    assert_eq!(send_pi["result"]["type"], "ok");
+    assert_eq!(send_pi["result"]["type"], "pane_send");
+    assert_eq!(send_pi["result"]["delivered"], true);
     let send_enter = send_request(
         &socket_path,
         &format!(
@@ -1433,7 +1442,8 @@ fn pane_report_agent_updates_effective_state() {
             pane_id
         ),
     );
-    assert_eq!(send_enter["result"]["type"], "ok");
+    assert_eq!(send_enter["result"]["type"], "pane_send");
+    assert_eq!(send_enter["result"]["delivered"], true);
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -1688,7 +1698,8 @@ fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
             pane_id
         ),
     );
-    assert_eq!(send_pi["result"]["type"], "ok");
+    assert_eq!(send_pi["result"]["type"], "pane_send");
+    assert_eq!(send_pi["result"]["delivered"], true);
     let send_enter = send_request(
         &socket_path,
         &format!(
@@ -1696,7 +1707,8 @@ fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
             pane_id
         ),
     );
-    assert_eq!(send_enter["result"]["type"], "ok");
+    assert_eq!(send_enter["result"]["type"], "pane_send");
+    assert_eq!(send_enter["result"]["delivered"], true);
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -1828,7 +1840,8 @@ fn pane_clear_agent_authority_restores_fallback_state() {
             pane_id
         ),
     );
-    assert_eq!(send_pi["result"]["type"], "ok");
+    assert_eq!(send_pi["result"]["type"], "pane_send");
+    assert_eq!(send_pi["result"]["delivered"], true);
     let send_enter = send_request(
         &socket_path,
         &format!(
@@ -1836,7 +1849,8 @@ fn pane_clear_agent_authority_restores_fallback_state() {
             pane_id
         ),
     );
-    assert_eq!(send_enter["result"]["type"], "ok");
+    assert_eq!(send_enter["result"]["type"], "pane_send");
+    assert_eq!(send_enter["result"]["delivered"], true);
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -1975,7 +1989,8 @@ fn events_subscribe_streams_output_and_agent_status_events() {
             pane_id
         ),
     );
-    assert_eq!(send_text["result"]["type"], "ok");
+    assert_eq!(send_text["result"]["type"], "pane_send");
+    assert_eq!(send_text["result"]["delivered"], true);
     let send_enter = send_request(
         &socket_path,
         &format!(
@@ -1983,7 +1998,8 @@ fn events_subscribe_streams_output_and_agent_status_events() {
             pane_id
         ),
     );
-    assert_eq!(send_enter["result"]["type"], "ok");
+    assert_eq!(send_enter["result"]["type"], "pane_send");
+    assert_eq!(send_enter["result"]["delivered"], true);
 
     let output_event = reader.read_json_line(Duration::from_secs(3));
     assert_eq!(output_event["event"], "pane.output_matched");
@@ -2005,7 +2021,8 @@ fn events_subscribe_streams_output_and_agent_status_events() {
             pane_id
         ),
     );
-    assert_eq!(send_pi["result"]["type"], "ok");
+    assert_eq!(send_pi["result"]["type"], "pane_send");
+    assert_eq!(send_pi["result"]["delivered"], true);
     let send_enter = send_request(
         &socket_path,
         &format!(
@@ -2013,7 +2030,8 @@ fn events_subscribe_streams_output_and_agent_status_events() {
             pane_id
         ),
     );
-    assert_eq!(send_enter["result"]["type"], "ok");
+    assert_eq!(send_enter["result"]["type"], "pane_send");
+    assert_eq!(send_enter["result"]["delivered"], true);
 
     let agent_idle = reader.read_json_line(Duration::from_secs(8));
     assert_eq!(agent_idle["event"], "pane.agent_status_changed");
@@ -2105,7 +2123,8 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
             background_pane_id
         ),
     );
-    assert_eq!(send_pi["result"]["type"], "ok");
+    assert_eq!(send_pi["result"]["type"], "pane_send");
+    assert_eq!(send_pi["result"]["delivered"], true);
     let send_enter = send_request(
         &socket_path,
         &format!(
@@ -2113,7 +2132,8 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
             background_pane_id
         ),
     );
-    assert_eq!(send_enter["result"]["type"], "ok");
+    assert_eq!(send_enter["result"]["type"], "pane_send");
+    assert_eq!(send_enter["result"]["delivered"], true);
 
     let status_event = reader.read_json_line(Duration::from_secs(12));
     assert_eq!(status_event["event"], "pane.agent_status_changed");

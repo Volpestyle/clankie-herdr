@@ -712,3 +712,85 @@ fn codex_osc_working_beats_weak_blocker_screen() {
         Some("osc_title_working")
     );
 }
+
+// --- composer ([composer] manifest section) ---
+
+fn composer_manifest(region: &str, empty_regex: &str) -> String {
+    format!(
+        r#"
+id = "codex"
+
+[composer]
+region = "{region}"
+empty_regex = [{empty_regex}]
+
+[[rules]]
+id = "test"
+state = "idle"
+contains = ["ready"]
+"#
+    )
+}
+
+#[test]
+fn manifest_composer_parses_and_validates() {
+    assert!(parse_manifest(&composer_manifest("prompt_box_body", r#"'^\s*❯\s*$'"#)).is_ok());
+    // Region defaults to prompt_box_body when omitted.
+    let manifest = parse_manifest(
+        r#"
+id = "codex"
+
+[composer]
+empty_regex = ['^\s*$']
+
+[[rules]]
+id = "test"
+state = "idle"
+contains = ["ready"]
+"#,
+    )
+    .expect("composer without region should parse");
+    assert_eq!(
+        manifest.composer.as_ref().map(|c| c.region.as_str()),
+        Some("prompt_box_body")
+    );
+
+    let invalid_region = parse_manifest(&composer_manifest("not_a_region", r#"'^\s*$'"#));
+    assert!(invalid_region.is_err());
+    let empty_patterns = parse_manifest(&composer_manifest("prompt_box_body", ""));
+    assert!(empty_patterns.is_err());
+    let invalid_regex = parse_manifest(&composer_manifest("prompt_box_body", r#"'['"#));
+    assert!(invalid_regex.is_err());
+}
+
+// Evidence strings from live claude pane reads (2026-07-08): the prompt box
+// body sits between two horizontal rules; the empty composer is a lone "❯".
+const CLAUDE_EMPTY_COMPOSER_SCREEN: &str = "⏺ some transcript text\n\n❯ an old submitted prompt\n\n──────────────────────────\n❯\n──────────────────────────\n  ⏵⏵ auto mode on (shift+tab to cycle)\n";
+const CLAUDE_COMPOSING_SCREEN: &str = "⏺ some transcript text\n\n──────────────────────────\n❯ this is a half-typed human message\n──────────────────────────\n  ⏵⏵ auto mode on (shift+tab to cycle)\n";
+const CLAUDE_NO_PROMPT_BOX_SCREEN: &str = " Quick safety check dialog\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n Enter to confirm · Esc to cancel\n";
+
+#[test]
+fn claude_composer_state_from_live_screen_evidence() {
+    assert_eq!(
+        composer_state(Agent::Claude, CLAUDE_EMPTY_COMPOSER_SCREEN),
+        crate::detect::ComposerState::Empty
+    );
+    assert_eq!(
+        composer_state(Agent::Claude, CLAUDE_COMPOSING_SCREEN),
+        crate::detect::ComposerState::NonEmpty
+    );
+    assert_eq!(
+        composer_state(Agent::Claude, CLAUDE_NO_PROMPT_BOX_SCREEN),
+        crate::detect::ComposerState::Unknown
+    );
+}
+
+#[test]
+fn composer_state_is_unknown_without_manifest_section() {
+    // The bundled codex manifest declares no [composer]; sends to codex panes
+    // gate on the human-input debounce only.
+    assert_eq!(
+        composer_state(Agent::Codex, "anything"),
+        crate::detect::ComposerState::Unknown
+    );
+}

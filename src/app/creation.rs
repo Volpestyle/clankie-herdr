@@ -404,6 +404,9 @@ impl App {
                 .and_then(|report| report.agent_session_id.clone()),
             agent_session_path: agent_session_report
                 .and_then(|report| report.agent_session_path.clone()),
+            send_queue_depth: u32::try_from(terminal.send_queue_depth())
+                .ok()
+                .filter(|depth| *depth > 0),
             revision: terminal.revision,
         })
     }

@@ -563,8 +563,12 @@ fn agent_rename(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_send(args: &[String]) -> std::io::Result<i32> {
+    let (now, args) = match args.first() {
+        Some(flag) if flag == "--now" => (true, &args[1..]),
+        _ => (false, args),
+    };
     if args.len() < 2 {
-        eprintln!("usage: herdr agent send <target> <text>");
+        eprintln!("usage: herdr agent send [--now] <target> <text>");
         return Ok(2);
     }
 
@@ -573,6 +577,7 @@ fn agent_send(args: &[String]) -> std::io::Result<i32> {
         method: Method::AgentSend(AgentSendParams {
             target: args[0].clone(),
             text: args[1..].join(" "),
+            now,
         }),
     })?)
 }
@@ -670,7 +675,7 @@ fn print_agent_help() {
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
-    eprintln!("  herdr agent send <target> <text>");
+    eprintln!("  herdr agent send [--now] <target> <text>");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
     eprintln!("  herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]");

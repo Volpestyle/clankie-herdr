@@ -535,7 +535,14 @@ fn render_pane_border_titles(app: &AppState, ws: &crate::workspace::Workspace, f
         let Some(title) = ws
             .pane_state(info.id)
             .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+            .and_then(|terminal| {
+                let label = terminal.border_label(app.show_agent_labels_on_pane_borders);
+                match (label, terminal.send_queue_depth()) {
+                    (label, 0) => label,
+                    (Some(label), depth) => Some(format!("{label} ✉{depth}")),
+                    (None, depth) => Some(format!("✉{depth}")),
+                }
+            })
             .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
         else {
             continue;

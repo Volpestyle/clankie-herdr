@@ -158,6 +158,16 @@ impl App {
                 pane_id,
                 workspace_id,
                 ..
+            }
+            | EventData::PaneSendQueued {
+                pane_id,
+                workspace_id,
+                ..
+            }
+            | EventData::PaneSendFlushed {
+                pane_id,
+                workspace_id,
+                ..
             } => self
                 .plugin_context_for_public_pane_id(pane_id, correlation_id)
                 .or_else(|| self.plugin_context_for_workspace_id(workspace_id, correlation_id))

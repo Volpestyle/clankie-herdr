@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use bytes::Bytes;
 
 use crate::api::schema::{
@@ -1473,14 +1475,65 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
-        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
-        if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
-            return encode_error(id, "pane_send_failed", err.to_string());
+        if params.now {
+            let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+                return pane_not_found(id, &params.pane_id);
+            };
+            if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
+                return encode_error(id, "pane_send_failed", err.to_string());
+            }
+            let queue_depth = self.note_pane_agent_send_now(ws_idx, pane_id, Instant::now());
+            return encode_success(
+                id,
+                ResponseResult::PaneSend {
+                    delivered: true,
+                    queue_depth,
+                },
+            );
         }
 
-        encode_success(id, ResponseResult::Ok {})
+        self.encode_enqueue_pane_send(id, ws_idx, pane_id, params.text, false, Vec::new())
+    }
+
+    /// Shared queued-send tail for the pane send handlers: enqueue, attempt
+    /// an immediate flush, and encode the outcome.
+    fn encode_enqueue_pane_send(
+        &mut self,
+        id: String,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        text: String,
+        encode_text: bool,
+        keys: Vec<String>,
+    ) -> String {
+        match self.enqueue_pane_send(ws_idx, pane_id, text, encode_text, keys, Instant::now()) {
+            Ok(crate::app::send_queue::SendDisposition::Delivered) => encode_success(
+                id,
+                ResponseResult::PaneSend {
+                    delivered: true,
+                    queue_depth: 0,
+                },
+            ),
+            Ok(crate::app::send_queue::SendDisposition::Queued { depth }) => encode_success(
+                id,
+                ResponseResult::PaneSend {
+                    delivered: false,
+                    queue_depth: depth as u32,
+                },
+            ),
+            Err(crate::app::send_queue::SendQueueError::PaneNotFound) => pane_not_found(
+                id,
+                &self.public_pane_id(ws_idx, pane_id).unwrap_or_default(),
+            ),
+            Err(crate::app::send_queue::SendQueueError::InvalidKey(key)) => {
+                encode_error(id, "invalid_key", format!("unsupported key {key}"))
+            }
+            Err(crate::app::send_queue::SendQueueError::QueueFull) => encode_error(
+                id,
+                "send_queue_full",
+                "pane send queue is full; retry after it drains or use now",
+            ),
+        }
     }
 
     pub(super) fn handle_pane_send_input(
@@ -1491,26 +1544,38 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
-        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
-        let encoded_keys = match encode_api_keys(runtime, &params.keys) {
-            Ok(encoded_keys) => encoded_keys,
-            Err(key) => return encode_error(id, "invalid_key", format!("unsupported key {key}")),
-        };
-        if !params.text.is_empty() {
-            let text_bytes = encode_api_text(runtime, &params.text);
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(text_bytes)) {
-                return encode_error(id, "pane_send_failed", err.to_string());
+        if params.now {
+            let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+                return pane_not_found(id, &params.pane_id);
+            };
+            let encoded_keys = match encode_api_keys(runtime, &params.keys) {
+                Ok(encoded_keys) => encoded_keys,
+                Err(key) => {
+                    return encode_error(id, "invalid_key", format!("unsupported key {key}"))
+                }
+            };
+            if !params.text.is_empty() {
+                let text_bytes = encode_api_text(runtime, &params.text);
+                if let Err(err) = runtime.try_send_bytes(Bytes::from(text_bytes)) {
+                    return encode_error(id, "pane_send_failed", err.to_string());
+                }
             }
-        }
-        for bytes in encoded_keys {
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
-                return encode_error(id, "pane_send_failed", err.to_string());
+            for bytes in encoded_keys {
+                if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+                    return encode_error(id, "pane_send_failed", err.to_string());
+                }
             }
+            let queue_depth = self.note_pane_agent_send_now(ws_idx, pane_id, Instant::now());
+            return encode_success(
+                id,
+                ResponseResult::PaneSend {
+                    delivered: true,
+                    queue_depth,
+                },
+            );
         }
 
-        encode_success(id, ResponseResult::Ok {})
+        self.encode_enqueue_pane_send(id, ws_idx, pane_id, params.text, true, params.keys)
     }
 
     pub(super) fn handle_pane_close(&mut self, id: String, target: PaneTarget) -> String {
@@ -1589,20 +1654,32 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
-        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
-        let encoded_keys = match encode_api_keys(runtime, &params.keys) {
-            Ok(encoded_keys) => encoded_keys,
-            Err(key) => return encode_error(id, "invalid_key", format!("unsupported key {key}")),
-        };
-        for bytes in encoded_keys {
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
-                return encode_error(id, "pane_send_failed", err.to_string());
+        if params.now {
+            let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+                return pane_not_found(id, &params.pane_id);
+            };
+            let encoded_keys = match encode_api_keys(runtime, &params.keys) {
+                Ok(encoded_keys) => encoded_keys,
+                Err(key) => {
+                    return encode_error(id, "invalid_key", format!("unsupported key {key}"))
+                }
+            };
+            for bytes in encoded_keys {
+                if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+                    return encode_error(id, "pane_send_failed", err.to_string());
+                }
             }
+            let queue_depth = self.note_pane_agent_send_now(ws_idx, pane_id, Instant::now());
+            return encode_success(
+                id,
+                ResponseResult::PaneSend {
+                    delivered: true,
+                    queue_depth,
+                },
+            );
         }
 
-        encode_success(id, ResponseResult::Ok {})
+        self.encode_enqueue_pane_send(id, ws_idx, pane_id, String::new(), false, params.keys)
     }
 }
 
@@ -1987,12 +2064,19 @@ mod tests {
                     "ctrl+k".into(),
                     "ctrl+l".into(),
                 ],
+                now: false,
             }),
         });
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
-        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneSend {
+                delivered: true,
+                queue_depth: 0
+            }
+        );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x08]));
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0a]));
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0b]));
@@ -2009,12 +2093,19 @@ mod tests {
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
                 pane_id,
                 keys: vec!["C-c".into(), "c-c".into(), "ctrl+c".into()],
+                now: false,
             }),
         });
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
-        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneSend {
+                delivered: true,
+                queue_depth: 0
+            }
+        );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
@@ -2030,12 +2121,19 @@ mod tests {
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
                 pane_id,
                 keys: vec!["+".into()],
+                now: false,
             }),
         });
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
-        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneSend {
+                delivered: true,
+                queue_depth: 0
+            }
+        );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"+"));
         assert!(rx.try_recv().is_err());
     }
@@ -2050,12 +2148,19 @@ mod tests {
                 pane_id,
                 text: String::new(),
                 keys: vec!["ctrl+j".into()],
+                now: false,
             }),
         });
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
-        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneSend {
+                delivered: true,
+                queue_depth: 0
+            }
+        );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0a]));
         assert!(rx.try_recv().is_err());
     }
@@ -2069,6 +2174,7 @@ mod tests {
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
                 pane_id,
                 keys: vec!["ctrl+h".into(), "not-a-key".into()],
+                now: false,
             }),
         });
 
@@ -2089,12 +2195,135 @@ mod tests {
                 pane_id,
                 text: "hello".into(),
                 keys: vec!["ctrl+h".into(), raw_key.clone()],
+                now: false,
             }),
         });
 
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_key");
         assert_eq!(error.error.message, format!("unsupported key {raw_key}"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn api_pane_send_text_holds_while_human_recently_typed_then_flushes() {
+        let (mut app, public_pane_id, mut rx) = app_with_send_key_runtime(4);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let now = std::time::Instant::now();
+        app.note_pane_human_input(0, pane_id, now);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendText(PaneSendTextParams {
+                pane_id: public_pane_id,
+                text: "worker report".into(),
+                now: false,
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneSend {
+                delivered: false,
+                queue_depth: 1
+            }
+        );
+        assert!(rx.try_recv().is_err(), "held send must not reach the PTY");
+        assert!(
+            app.next_send_queue_flush.is_some(),
+            "retry must be scheduled"
+        );
+
+        // Still held inside the quiet window.
+        assert!(!app.flush_send_queues(now + std::time::Duration::from_millis(500)));
+        assert!(rx.try_recv().is_err());
+
+        // Past the quiet window the queue drains in order.
+        let later = now
+            + crate::terminal::state::HUMAN_INPUT_QUIET_WINDOW
+            + std::time::Duration::from_millis(1);
+        assert!(app.flush_send_queues(later));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"worker report")
+        );
+        assert!(
+            app.next_send_queue_flush.is_none(),
+            "empty queue clears retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_pane_send_text_now_bypasses_hold() {
+        let (mut app, public_pane_id, mut rx) = app_with_send_key_runtime(4);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.note_pane_human_input(0, pane_id, std::time::Instant::now());
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendText(PaneSendTextParams {
+                pane_id: public_pane_id,
+                text: "urgent".into(),
+                now: true,
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneSend {
+                delivered: true,
+                queue_depth: 0
+            }
+        );
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"urgent"));
+    }
+
+    #[tokio::test]
+    async fn api_held_sends_flush_in_request_order_across_calls() {
+        // The ubiquitous two-call pattern: text via one request, Enter via a
+        // second. Both hold while the human types, then land back-to-back.
+        let (mut app, public_pane_id, mut rx) = app_with_send_key_runtime(4);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let now = std::time::Instant::now();
+        app.note_pane_human_input(0, pane_id, now);
+
+        app.handle_api_request(crate::api::schema::Request {
+            id: "req1".into(),
+            method: crate::api::schema::Method::PaneSendText(PaneSendTextParams {
+                pane_id: public_pane_id.clone(),
+                text: "message".into(),
+                now: false,
+            }),
+        });
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req2".into(),
+            method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id: public_pane_id,
+                keys: vec!["Enter".into()],
+                now: false,
+            }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneSend {
+                delivered: false,
+                queue_depth: 2
+            }
+        );
+        assert!(rx.try_recv().is_err());
+
+        let later = now
+            + crate::terminal::state::HUMAN_INPUT_QUIET_WINDOW
+            + std::time::Duration::from_millis(1);
+        assert!(app.flush_send_queues(later));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"message")
+        );
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"\r"));
         assert!(rx.try_recv().is_err());
     }
 

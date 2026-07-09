@@ -124,6 +124,7 @@ pub struct RuleEvidence {
 struct LoadedManifest {
     manifest: AgentManifest,
     compiled_rules: Vec<CompiledRule>,
+    compiled_composer: Option<CompiledComposer>,
     source: ManifestSource,
     warning: Option<String>,
     cached_remote_version: Option<String>,
@@ -145,6 +146,8 @@ pub(crate) struct AgentManifest {
     _updated_at: Option<String>,
     #[serde(default)]
     aliases: Vec<String>,
+    #[serde(default)]
+    composer: Option<ManifestComposer>,
     #[serde(default)]
     rules: Vec<ManifestRule>,
 }
@@ -195,6 +198,27 @@ struct ManifestGate {
     regex: Vec<String>,
     #[serde(default)]
     line_regex: Vec<String>,
+}
+
+/// Optional description of the agent's input composer (prompt box). Used to
+/// decide whether queued API sends may be flushed without splicing into a
+/// half-typed human message.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct ManifestComposer {
+    #[serde(default = "default_composer_region")]
+    region: String,
+    empty_regex: Vec<String>,
+}
+
+fn default_composer_region() -> String {
+    "prompt_box_body".to_string()
+}
+
+#[derive(Debug, Clone)]
+struct CompiledComposer {
+    region: String,
+    empty_regex: Vec<Regex>,
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +403,39 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
         };
     };
     explain(agent, screen_content)
+}
+
+/// Evaluate the state of the agent's input composer (prompt box) from the
+/// detection screen snapshot. `Unknown` means the manifest declares no
+/// composer, the composer region is not visible on the current screen, or no
+/// manifest exists for the agent.
+pub fn composer_state(agent: Agent, screen_content: &str) -> super::ComposerState {
+    let Some(loaded) = load_manifest(agent) else {
+        return super::ComposerState::Unknown;
+    };
+    let Some(composer) = &loaded.compiled_composer else {
+        return super::ComposerState::Unknown;
+    };
+    let region_text = region(
+        DetectionInput {
+            screen: screen_content,
+            osc_title: "",
+            osc_progress: "",
+        },
+        &composer.region,
+    );
+    if region_text.trim().is_empty() {
+        return super::ComposerState::Unknown;
+    }
+    if composer
+        .empty_regex
+        .iter()
+        .any(|regex| regex.is_match(region_text))
+    {
+        super::ComposerState::Empty
+    } else {
+        super::ComposerState::NonEmpty
+    }
 }
 
 pub fn should_skip_state_update(agent: Agent, screen_content: &str) -> bool {
@@ -670,14 +727,35 @@ fn loaded_manifest(
     local_override_shadowing_remote: bool,
 ) -> Result<LoadedManifest, String> {
     let compiled_rules = compile_manifest(&manifest)?;
+    let compiled_composer = compile_composer(&manifest)?;
     Ok(LoadedManifest {
         manifest,
         compiled_rules,
+        compiled_composer,
         source,
         warning,
         cached_remote_version,
         local_override_shadowing_remote,
     })
+}
+
+fn compile_composer(manifest: &AgentManifest) -> Result<Option<CompiledComposer>, String> {
+    let Some(composer) = &manifest.composer else {
+        return Ok(None);
+    };
+    let empty_regex = composer
+        .empty_regex
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern).map_err(|err| {
+                format!("composer empty_regex pattern {pattern:?} is invalid: {err}")
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Some(CompiledComposer {
+        region: composer.region.clone(),
+        empty_regex,
+    }))
 }
 
 fn bundled_loaded_manifest(
@@ -923,6 +1001,15 @@ fn validate_manifest(manifest: &AgentManifest) -> Result<(), String> {
             .map_err(|err| format!("rule {} uses invalid region: {err}", rule.id))?;
         validate_rule_gate(rule, &mut complexity)
             .map_err(|err| format!("rule {} has invalid matcher gates: {err}", rule.id))?;
+    }
+
+    if let Some(composer) = &manifest.composer {
+        validate_region_name(&composer.region)
+            .map_err(|err| format!("composer uses invalid region: {err}"))?;
+        if composer.empty_regex.is_empty() {
+            return Err("composer must declare at least one empty_regex pattern".to_string());
+        }
+        validate_regex_patterns(&composer.empty_regex, "composer", "empty_regex")?;
     }
 
     Ok(())

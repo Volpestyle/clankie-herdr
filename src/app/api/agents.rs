@@ -184,14 +184,62 @@ impl App {
             Ok(resolved) => resolved,
             Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
         };
-        let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id) else {
-            return agent_not_found(id, &params.target);
-        };
-        if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
-            return encode_error(id, "agent_send_failed", err.to_string());
+        if params.now {
+            let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id)
+            else {
+                return agent_not_found(id, &params.target);
+            };
+            if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
+                return encode_error(id, "agent_send_failed", err.to_string());
+            }
+            let queue_depth = self.note_pane_agent_send_now(
+                resolved.ws_idx,
+                resolved.pane_id,
+                std::time::Instant::now(),
+            );
+            return encode_success(
+                id,
+                ResponseResult::PaneSend {
+                    delivered: true,
+                    queue_depth,
+                },
+            );
         }
 
-        encode_success(id, ResponseResult::Ok {})
+        match self.enqueue_pane_send(
+            resolved.ws_idx,
+            resolved.pane_id,
+            params.text,
+            false,
+            Vec::new(),
+            std::time::Instant::now(),
+        ) {
+            Ok(crate::app::send_queue::SendDisposition::Delivered) => encode_success(
+                id,
+                ResponseResult::PaneSend {
+                    delivered: true,
+                    queue_depth: 0,
+                },
+            ),
+            Ok(crate::app::send_queue::SendDisposition::Queued { depth }) => encode_success(
+                id,
+                ResponseResult::PaneSend {
+                    delivered: false,
+                    queue_depth: depth as u32,
+                },
+            ),
+            Err(crate::app::send_queue::SendQueueError::PaneNotFound) => {
+                agent_not_found(id, &params.target)
+            }
+            Err(crate::app::send_queue::SendQueueError::InvalidKey(key)) => {
+                encode_error(id, "invalid_key", format!("unsupported key {key}"))
+            }
+            Err(crate::app::send_queue::SendQueueError::QueueFull) => encode_error(
+                id,
+                "send_queue_full",
+                "agent send queue is full; retry after it drains or use now",
+            ),
+        }
     }
 }
 

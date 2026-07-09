@@ -114,6 +114,14 @@ impl App {
         }
 
         if let Some(ws_idx) = self.state.active {
+            if let Some(pane_id) = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.focused_pane_id())
+            {
+                self.note_pane_human_input(ws_idx, pane_id, std::time::Instant::now());
+            }
             if let Some(rt) = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)

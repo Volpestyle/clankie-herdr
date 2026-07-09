@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Composition-aware pane send queue: `pane.send_text` / `pane.send_keys` / `pane.send_input` / `agent.send` hold while a human is typing in the target pane and flush in order once its composer is free; `--now` bypasses, `pane.send_queued` / `pane.send_flushed` events and `send_queue_depth` expose held sends.
 - Added `ui.sidebar_collapsed_mode = "hidden"` to make a collapsed sidebar use zero width while keeping the existing compact rail as the default. (#842)
 - Added `herdr completion <shell>` / `herdr completions <shell>` to generate shell completion scripts for bash, elvish, fish, PowerShell, and zsh. (#435)
 - Added `session.snapshot` to bootstrap client runtime state in one socket API response before subscribing to events.

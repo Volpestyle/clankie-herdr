@@ -38,6 +38,28 @@ pub struct AgentDetection {
     pub visible_working: bool,
 }
 
+/// State of an agent's input composer (prompt box), derived from the
+/// detection screen snapshot via the agent manifest's `[composer]` section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerState {
+    /// The composer is visible and holds no typed text.
+    Empty,
+    /// The composer is visible and holds typed, unsubmitted text.
+    NonEmpty,
+    /// No composer information: unknown agent, no `[composer]` manifest
+    /// section, or the composer region is not visible on this screen.
+    Unknown,
+}
+
+/// Evaluate the composer state for a pane's detection snapshot. Returns
+/// `Unknown` when no agent is known.
+pub fn detect_composer_state(agent: Option<Agent>, screen_content: &str) -> ComposerState {
+    match agent {
+        Some(agent) => manifest::composer_state(agent, screen_content),
+        None => ComposerState::Unknown,
+    }
+}
+
 /// Which agent we detected running in a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {

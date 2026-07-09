@@ -1,6 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-#[cfg(any(windows, test))]
 use std::time::Duration;
 use std::time::Instant;
 
@@ -9,8 +8,50 @@ use std::time::Instant;
 // remains only for session-only/custom hook paths and fallback detection.
 // Process-exit updates clear matching hook authority before recomputing state.
 
-use crate::detect::{Agent, AgentState};
+use crate::detect::{Agent, AgentState, ComposerState};
 use crate::terminal::TerminalId;
+
+/// How long after a human keystroke queued sends stay held, so a message is
+/// never spliced between keystrokes the human is actively typing.
+pub const HUMAN_INPUT_QUIET_WINDOW: Duration = Duration::from_millis(2500);
+
+/// Cap on queued sends per terminal; a full queue rejects further sends
+/// instead of growing without bound while a composer stays occupied.
+pub const MAX_PENDING_SENDS: usize = 64;
+
+/// One API-originated send held in a terminal's send queue. Text and key
+/// names are stored unencoded; encoding happens at flush time so mode-aware
+/// encodings (bracketed paste, kitty keys) reflect the terminal's state when
+/// the bytes are actually written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedSend {
+    pub text: String,
+    /// Whether `text` goes through mode-aware input encoding (bracketed
+    /// paste) at flush, matching `pane.send_input`; `pane.send_text` and
+    /// `agent.send` write text bytes raw.
+    pub encode_text: bool,
+    pub keys: Vec<String>,
+    pub enqueued_at: Instant,
+}
+
+/// Who plausibly authored the text currently sitting in the composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerAuthor {
+    Human,
+    Agent,
+    Unknown,
+}
+
+/// (source, agent label, session ref kind, session ref value, session id,
+/// session path) tuple backing the API session identity projection.
+type SessionIdentityForApi = (
+    String,
+    String,
+    crate::agent_resume::AgentSessionRefKind,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 #[path = "metadata.rs"]
 mod metadata;
@@ -94,6 +135,9 @@ pub struct TerminalState {
     pub respawn_shell_on_exit: bool,
     recent_agent_process_exit_at: Option<Instant>,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
+    pending_sends: VecDeque<QueuedSend>,
+    last_human_input_at: Option<Instant>,
+    last_agent_send_at: Option<Instant>,
 }
 
 impl TerminalState {
@@ -121,6 +165,83 @@ impl TerminalState {
             respawn_shell_on_exit: false,
             recent_agent_process_exit_at: None,
             pending_agent_resume_plan: None,
+            pending_sends: VecDeque::new(),
+            last_human_input_at: None,
+            last_agent_send_at: None,
+        }
+    }
+
+    /// Record human-originated input (TUI keystrokes, client-attach bytes,
+    /// paste). API sends must never call this.
+    pub fn note_human_input(&mut self, now: Instant) {
+        self.last_human_input_at = Some(now);
+    }
+
+    /// Record that an API-originated send was written to the PTY, so composer
+    /// text produced by that send is not mistaken for human composition.
+    pub fn note_agent_send(&mut self, now: Instant) {
+        self.last_agent_send_at = Some(now);
+    }
+
+    /// Queue an API-originated send for composition-aware delivery. Returns
+    /// the new queue depth, or `Err` when the queue is full.
+    pub fn enqueue_send(&mut self, send: QueuedSend) -> Result<usize, ()> {
+        if self.pending_sends.len() >= MAX_PENDING_SENDS {
+            return Err(());
+        }
+        self.pending_sends.push_back(send);
+        Ok(self.pending_sends.len())
+    }
+
+    pub fn pop_pending_send(&mut self) -> Option<QueuedSend> {
+        self.pending_sends.pop_front()
+    }
+
+    /// Put a send back at the head of the queue after a failed PTY write so
+    /// delivery order is preserved for the retry.
+    pub fn requeue_pending_send_front(&mut self, send: QueuedSend) {
+        self.pending_sends.push_front(send);
+    }
+
+    pub fn send_queue_depth(&self) -> usize {
+        self.pending_sends.len()
+    }
+
+    /// Whether queued sends may be flushed to the PTY right now.
+    ///
+    /// Held while a human typed within the quiet window, or while the visible
+    /// composer holds text the human (or nobody we can identify) authored. A
+    /// non-empty composer whose text came from our own flushed sends does not
+    /// hold the queue — the ubiquitous "send text, then send Enter" two-call
+    /// pattern depends on that. A `Blocked` terminal is showing a dialog, not
+    /// a composer, so the non-empty hold does not apply there either.
+    pub fn send_gate_open(&self, composer: ComposerState, now: Instant) -> bool {
+        let human_recently_typed = self
+            .last_human_input_at
+            .is_some_and(|at| now.saturating_duration_since(at) < HUMAN_INPUT_QUIET_WINDOW);
+        if human_recently_typed {
+            return false;
+        }
+        match composer {
+            ComposerState::Empty | ComposerState::Unknown => true,
+            ComposerState::NonEmpty => {
+                self.state == AgentState::Blocked || self.composer_author() == ComposerAuthor::Agent
+            }
+        }
+    }
+
+    fn composer_author(&self) -> ComposerAuthor {
+        match (self.last_human_input_at, self.last_agent_send_at) {
+            (Some(human), Some(agent)) => {
+                if human > agent {
+                    ComposerAuthor::Human
+                } else {
+                    ComposerAuthor::Agent
+                }
+            }
+            (Some(_), None) => ComposerAuthor::Human,
+            (None, Some(_)) => ComposerAuthor::Agent,
+            (None, None) => ComposerAuthor::Unknown,
         }
     }
 
@@ -879,16 +1000,7 @@ impl TerminalState {
         })
     }
 
-    fn current_session_identity_for_api(
-        &self,
-    ) -> Option<(
-        String,
-        String,
-        crate::agent_resume::AgentSessionRefKind,
-        String,
-        Option<String>,
-        Option<String>,
-    )> {
+    fn current_session_identity_for_api(&self) -> Option<SessionIdentityForApi> {
         if let Some(authority) = self.hook_authority.as_ref() {
             if let Some(session_ref) = authority.session_ref.as_ref() {
                 return Some((
@@ -4293,5 +4405,106 @@ mod tests {
             terminal.hook_authority.as_ref().unwrap().source,
             "custom:pi"
         );
+    }
+}
+
+#[cfg(test)]
+mod send_gate_tests {
+    use super::*;
+
+    fn test_terminal() -> TerminalState {
+        TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    fn queued(text: &str, at: Instant) -> QueuedSend {
+        QueuedSend {
+            text: text.into(),
+            encode_text: false,
+            keys: Vec::new(),
+            enqueued_at: at,
+        }
+    }
+
+    #[test]
+    fn gate_holds_while_human_recently_typed_regardless_of_composer() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.note_human_input(now);
+        assert!(!terminal.send_gate_open(ComposerState::Empty, now));
+        assert!(!terminal.send_gate_open(ComposerState::Unknown, now));
+        assert!(!terminal.send_gate_open(ComposerState::NonEmpty, now));
+        // Past the quiet window, an empty composer opens the gate again.
+        let later = now + HUMAN_INPUT_QUIET_WINDOW + Duration::from_millis(1);
+        assert!(terminal.send_gate_open(ComposerState::Empty, later));
+    }
+
+    #[test]
+    fn gate_holds_on_human_authored_composer_text_without_time_limit() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.note_human_input(now);
+        let much_later = now + Duration::from_secs(3600);
+        assert!(!terminal.send_gate_open(ComposerState::NonEmpty, much_later));
+        // The same stale composer does not block once it empties.
+        assert!(terminal.send_gate_open(ComposerState::Empty, much_later));
+    }
+
+    #[test]
+    fn gate_opens_on_agent_authored_composer_text() {
+        // The two-call "send text, then send Enter" pattern: our own flushed
+        // text sits in the composer and must not hold the follow-up keys.
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.note_human_input(now);
+        let after_flush = now + HUMAN_INPUT_QUIET_WINDOW + Duration::from_millis(1);
+        terminal.note_agent_send(after_flush);
+        assert!(terminal.send_gate_open(ComposerState::NonEmpty, after_flush));
+    }
+
+    #[test]
+    fn gate_holds_on_composer_text_of_unknown_authorship() {
+        let terminal = test_terminal();
+        assert!(!terminal.send_gate_open(ComposerState::NonEmpty, Instant::now()));
+    }
+
+    #[test]
+    fn gate_treats_blocked_dialog_cursor_as_open() {
+        // Blocked dialogs render a "❯" menu cursor that looks like composer
+        // text; unblocking sends must still deliver.
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.note_human_input(now);
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Blocked);
+        let later = now + HUMAN_INPUT_QUIET_WINDOW + Duration::from_millis(1);
+        assert!(terminal.send_gate_open(ComposerState::NonEmpty, later));
+    }
+
+    #[test]
+    fn send_queue_is_fifo_with_front_requeue_and_bounded() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        assert_eq!(terminal.enqueue_send(queued("a", now)), Ok(1));
+        assert_eq!(terminal.enqueue_send(queued("b", now)), Ok(2));
+
+        let first = terminal.pop_pending_send().expect("first send");
+        assert_eq!(first.text, "a");
+        terminal.requeue_pending_send_front(first);
+        assert_eq!(
+            terminal.pop_pending_send().map(|send| send.text),
+            Some("a".into())
+        );
+        assert_eq!(
+            terminal.pop_pending_send().map(|send| send.text),
+            Some("b".into())
+        );
+        assert_eq!(terminal.send_queue_depth(), 0);
+
+        for index in 0..MAX_PENDING_SENDS {
+            assert_eq!(
+                terminal.enqueue_send(queued(&index.to_string(), now)),
+                Ok(index + 1)
+            );
+        }
+        assert_eq!(terminal.enqueue_send(queued("overflow", now)), Err(()));
     }
 }

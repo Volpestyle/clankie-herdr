@@ -857,6 +857,7 @@ mod tests {
             agent_session: None,
             agent_session_id: None,
             agent_session_path: None,
+            send_queue_depth: None,
             revision: 0,
         }
     }

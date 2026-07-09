@@ -15,6 +15,7 @@ mod ids;
 mod input;
 mod runtime;
 mod runtime_mutations;
+mod send_queue;
 mod session;
 pub mod state;
 mod terminal_targets;
@@ -117,6 +118,7 @@ pub struct App {
     pub(crate) last_sidebar_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
     pub(crate) next_resize_poll: Instant,
+    pub(crate) next_send_queue_flush: Option<Instant>,
     pub(crate) next_animation_tick: Option<Instant>,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
@@ -704,6 +706,7 @@ impl App {
             last_sidebar_divider_click: None,
             last_pane_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
+            next_send_queue_flush: None,
             next_animation_tick: None,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
@@ -3978,6 +3981,24 @@ mod tests {
         app.handle_scheduled_tasks(Instant::now(), false);
 
         assert!(app.session_save_deadline.is_none());
+    }
+
+    #[test]
+    fn next_loop_deadline_includes_send_queue_flush_deadline() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.next_resize_poll = now + Duration::from_millis(300);
+        app.next_send_queue_flush = Some(now + Duration::from_millis(5));
+        app.next_animation_tick = Some(now + Duration::from_millis(100));
+        app.session_save_deadline = Some(now + Duration::from_millis(200));
+        assert_eq!(
+            app.next_loop_deadline(now, false),
+            app.next_send_queue_flush
+        );
+        assert_eq!(
+            app.next_headless_loop_deadline_with_git_refresh(now, false, true),
+            app.next_send_queue_flush
+        );
     }
 
     #[test]

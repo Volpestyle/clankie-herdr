@@ -270,6 +270,13 @@ impl App {
         }
 
         if self
+            .next_send_queue_flush
+            .is_some_and(|deadline| now >= deadline)
+        {
+            changed |= self.flush_send_queues(now);
+        }
+
+        if self
             .next_animation_tick
             .is_some_and(|deadline| now >= deadline)
         {
@@ -574,6 +581,7 @@ impl App {
 
         [
             include_resize_poll.then_some(self.next_resize_poll),
+            self.next_send_queue_flush,
             self.config_diagnostic_deadline,
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),

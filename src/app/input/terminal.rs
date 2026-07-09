@@ -22,6 +22,7 @@ impl App {
         let Some(input) = self.prepare_terminal_key_forward(key) else {
             return;
         };
+        self.note_pane_human_input(input.ws_idx, input.pane_id, std::time::Instant::now());
         if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
             let _ = runtime.try_send_bytes(input.bytes);
         }
@@ -183,6 +184,7 @@ impl App {
         let Some(input) = self.prepare_terminal_key_forward(key) else {
             return;
         };
+        self.note_pane_human_input(input.ws_idx, input.pane_id, std::time::Instant::now());
         if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
             let _ = runtime.send_bytes(input.bytes).await;
         }

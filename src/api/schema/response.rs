@@ -234,6 +234,13 @@ pub enum ResponseResult {
         status: crate::config::ConfigReloadStatus,
         diagnostics: Vec<String>,
     },
+    PaneSend {
+        /// True when the send was written to the PTY immediately; false when
+        /// it is held in the pane's composition-aware send queue.
+        delivered: bool,
+        /// Sends still held in the pane's queue after this request.
+        queue_depth: u32,
+    },
     Ok {},
 }
 

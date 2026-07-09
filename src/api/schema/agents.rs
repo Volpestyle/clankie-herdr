@@ -20,6 +20,10 @@ pub struct AgentReadParams {
 pub struct AgentSendParams {
     pub target: String,
     pub text: String,
+    /// Bypass the composition-aware send queue and write to the PTY
+    /// immediately, even while a human may be typing in the pane.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub now: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

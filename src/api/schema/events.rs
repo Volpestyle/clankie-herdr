@@ -72,6 +72,10 @@ pub enum Subscription {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_status: Option<AgentStatus>,
     },
+    #[serde(rename = "pane.send_queued")]
+    PaneSendQueued {},
+    #[serde(rename = "pane.send_flushed")]
+    PaneSendFlushed {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -204,6 +208,8 @@ pub enum EventKind {
     PaneExited,
     PaneAgentDetected,
     PaneAgentStatusChanged,
+    PaneSendQueued,
+    PaneSendFlushed,
 }
 
 impl EventKind {
@@ -231,6 +237,8 @@ impl EventKind {
             EventKind::PaneExited => "pane.exited",
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
+            EventKind::PaneSendQueued => "pane.send_queued",
+            EventKind::PaneSendFlushed => "pane.send_flushed",
         }
     }
 }
@@ -259,6 +267,8 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneExited,
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
+    EventKind::PaneSendQueued,
+    EventKind::PaneSendFlushed,
 ];
 
 pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
@@ -501,5 +511,16 @@ pub enum EventData {
         custom_status: Option<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         state_labels: HashMap<String, String>,
+    },
+    PaneSendQueued {
+        pane_id: String,
+        workspace_id: String,
+        queue_depth: u32,
+    },
+    PaneSendFlushed {
+        pane_id: String,
+        workspace_id: String,
+        delivered: u32,
+        queue_depth: u32,
     },
 }

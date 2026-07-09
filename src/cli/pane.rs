@@ -930,31 +930,51 @@ fn pane_close(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+/// Strip a leading `--now` flag (before the positional args, so message text
+/// can still contain a literal `--now`). Returns the flag and the rest.
+fn split_leading_now_flag(args: &[String]) -> (bool, &[String]) {
+    match args.first() {
+        Some(flag) if flag == "--now" => (true, &args[1..]),
+        _ => (false, args),
+    }
+}
+
 fn pane_send_text(args: &[String]) -> std::io::Result<i32> {
+    let (now, args) = split_leading_now_flag(args);
     if args.len() < 2 {
-        eprintln!("usage: herdr pane send-text <pane_id> <text>");
+        eprintln!("usage: herdr pane send-text [--now] <pane_id> <text>");
         return Ok(2);
     }
 
     let pane_id = super::normalize_pane_id(&args[0]);
     let text = args[1..].join(" ");
-    super::send_ok_request(Method::PaneSendText(PaneSendTextParams { pane_id, text }))
+    super::send_ok_request(Method::PaneSendText(PaneSendTextParams {
+        pane_id,
+        text,
+        now,
+    }))
 }
 
 fn pane_send_keys(args: &[String]) -> std::io::Result<i32> {
+    let (now, args) = split_leading_now_flag(args);
     if args.len() < 2 {
-        eprintln!("usage: herdr pane send-keys <pane_id> <key> [key ...]");
+        eprintln!("usage: herdr pane send-keys [--now] <pane_id> <key> [key ...]");
         return Ok(2);
     }
 
     let pane_id = super::normalize_pane_id(&args[0]);
     let keys = args[1..].to_vec();
-    super::send_ok_request(Method::PaneSendKeys(PaneSendKeysParams { pane_id, keys }))
+    super::send_ok_request(Method::PaneSendKeys(PaneSendKeysParams {
+        pane_id,
+        keys,
+        now,
+    }))
 }
 
 fn pane_run(args: &[String]) -> std::io::Result<i32> {
+    let (now, args) = split_leading_now_flag(args);
     if args.len() < 2 {
-        eprintln!("usage: herdr pane run <pane_id> <command>");
+        eprintln!("usage: herdr pane run [--now] <pane_id> <command>");
         return Ok(2);
     }
 
@@ -964,6 +984,7 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
         pane_id,
         text,
         keys: vec!["Enter".into()],
+        now,
     }))
 }
 
@@ -1457,13 +1478,13 @@ fn print_pane_help() {
     eprintln!("  herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]");
     eprintln!("  herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]");
     eprintln!("  herdr pane close <pane_id>");
-    eprintln!("  herdr pane send-text <pane_id> <text>");
-    eprintln!("  herdr pane send-keys <pane_id> <key> [key ...]");
+    eprintln!("  herdr pane send-text [--now] <pane_id> <text>");
+    eprintln!("  herdr pane send-keys [--now] <pane_id> <key> [key ...]");
     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
-    eprintln!("  herdr pane run <pane_id> <command>");
+    eprintln!("  herdr pane run [--now] <pane_id> <command>");
 }
 
 #[cfg(test)]

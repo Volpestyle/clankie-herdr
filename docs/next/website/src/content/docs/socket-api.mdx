@@ -131,6 +131,19 @@ like `ctrl+h`, `control+j`, `alt+x`, and `shift+tab`, function keys like
 `f1`, and named punctuation like `minus` and `plus`. They do not accept
 `prefix+` binding strings.
 
+`pane.send_text`, `pane.send_keys`, `pane.send_input`, and `agent.send` are
+composition-aware: sends queue per pane and flush only when no human
+keystrokes reached the pane recently and the pane's visible composer holds no
+human-typed text, so an API send never splices into a message a human is
+typing. Queued sends flush in request order. Send responses report
+`{"type":"pane_send","delivered":true|false,"queue_depth":N}`;
+`pane.send_queued` / `pane.send_flushed` events track held sends, and
+`pane.list` / `pane.get` expose `send_queue_depth` while sends are held (the
+TUI shows a `✉N` badge on the pane border). Pass `"now":true` (CLI: a leading
+`--now`) to bypass the queue and write immediately — reserve it for
+interrupts such as `esc`. Panes whose agent detection manifest declares no
+`[composer]` section gate on the keystroke debounce only.
+
 ```json
 {"id":"req_current","method":"pane.current","params":{"caller_pane_id":"w1:p1"}}
 {"id":"req_layout","method":"pane.layout","params":{"pane_id":"w1:p1"}}

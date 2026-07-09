@@ -636,6 +636,64 @@
                 "agent_status"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "queue_depth": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_send_queued",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "queue_depth"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delivered": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "queue_depth": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_send_flushed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "delivered",
+                "queue_depth"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -662,7 +720,9 @@
             "pane_output_changed",
             "pane_exited",
             "pane_agent_detected",
-            "pane_agent_status_changed"
+            "pane_agent_status_changed",
+            "pane_send_queued",
+            "pane_send_flushed"
           ],
           "type": "string"
         },
@@ -739,6 +799,15 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "send_queue_depth": {
+              "description": "Number of API sends held in the composition-aware send queue.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "state_labels": {
               "additionalProperties": {
@@ -1006,6 +1075,10 @@
         },
         "AgentSendParams": {
           "properties": {
+            "now": {
+              "description": "Bypass the composition-aware send queue and write to the PTY\nimmediately, even while a human may be typing in the pane.",
+              "type": "boolean"
+            },
             "target": {
               "type": "string"
             },
@@ -2309,6 +2382,10 @@
               },
               "type": "array"
             },
+            "now": {
+              "description": "Bypass the composition-aware send queue and write to the PTY\nimmediately, even while a human may be typing in the pane.",
+              "type": "boolean"
+            },
             "pane_id": {
               "type": "string"
             },
@@ -2329,6 +2406,10 @@
               },
               "type": "array"
             },
+            "now": {
+              "description": "Bypass the composition-aware send queue and write to the PTY\nimmediately, even while a human may be typing in the pane.",
+              "type": "boolean"
+            },
             "pane_id": {
               "type": "string"
             }
@@ -2341,6 +2422,10 @@
         },
         "PaneSendTextParams": {
           "properties": {
+            "now": {
+              "description": "Bypass the composition-aware send queue and write to the PTY\nimmediately, even while a human may be typing in the pane.",
+              "type": "boolean"
+            },
             "pane_id": {
               "type": "string"
             },
@@ -3230,6 +3315,30 @@
               "required": [
                 "type",
                 "pane_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "pane.send_queued",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "pane.send_flushed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
               ],
               "type": "object"
             }
@@ -5812,6 +5921,64 @@
                 "agent_status"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "queue_depth": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_send_queued",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "queue_depth"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delivered": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "queue_depth": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_send_flushed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "delivered",
+                "queue_depth"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -5853,7 +6020,9 @@
             "pane_output_changed",
             "pane_exited",
             "pane_agent_detected",
-            "pane_agent_status_changed"
+            "pane_agent_status_changed",
+            "pane_send_queued",
+            "pane_send_flushed"
           ],
           "type": "string"
         },
@@ -6265,6 +6434,15 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "send_queue_depth": {
+              "description": "Number of API sends held in the composition-aware send queue.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "state_labels": {
               "additionalProperties": {
@@ -8352,6 +8530,30 @@
                 "type",
                 "status",
                 "diagnostics"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delivered": {
+                  "description": "True when the send was written to the PTY immediately; false when\nit is held in the pane's composition-aware send queue.",
+                  "type": "boolean"
+                },
+                "queue_depth": {
+                  "description": "Sends still held in the pane's queue after this request.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_send",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delivered",
+                "queue_depth"
               ],
               "type": "object"
             },

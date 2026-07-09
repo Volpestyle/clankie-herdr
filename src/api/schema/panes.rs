@@ -228,12 +228,20 @@ pub struct PaneRenameParams {
 pub struct PaneSendTextParams {
     pub pane_id: String,
     pub text: String,
+    /// Bypass the composition-aware send queue and write to the PTY
+    /// immediately, even while a human may be typing in the pane.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub now: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneSendKeysParams {
     pub pane_id: String,
     pub keys: Vec<String>,
+    /// Bypass the composition-aware send queue and write to the PTY
+    /// immediately, even while a human may be typing in the pane.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub now: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -243,6 +251,10 @@ pub struct PaneSendInputParams {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<String>,
+    /// Bypass the composition-aware send queue and write to the PTY
+    /// immediately, even while a human may be typing in the pane.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub now: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -394,6 +406,9 @@ pub struct PaneInfo {
     pub agent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_path: Option<String>,
+    /// Number of API sends held in the composition-aware send queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_queue_depth: Option<u32>,
     pub revision: u64,
 }
 

@@ -590,6 +590,7 @@ fn worktree_request_and_response_round_trip() {
                 agent_session: None,
                 agent_session_id: None,
                 agent_session_path: None,
+                send_queue_depth: None,
                 revision: 0,
             },
             worktree: WorktreeInfo {
@@ -994,6 +995,7 @@ fn create_response_round_trips_with_root_pane() {
                 agent_session: None,
                 agent_session_id: None,
                 agent_session_path: None,
+                send_queue_depth: None,
                 revision: 0,
             },
         },

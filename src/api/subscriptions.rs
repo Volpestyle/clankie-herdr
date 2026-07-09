@@ -188,6 +188,14 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::PaneAgentDetected,
                 last_sequence: 0,
             })),
+            Subscription::PaneSendQueued {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::PaneSendQueued,
+                last_sequence: 0,
+            })),
+            Subscription::PaneSendFlushed {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::PaneSendFlushed,
+                last_sequence: 0,
+            })),
             Subscription::PaneOutputMatched {
                 pane_id,
                 source,
