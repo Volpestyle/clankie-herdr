@@ -2926,6 +2926,17 @@ fn push_plain_cell(line: &mut String, wide: crate::ghostty::CellWide, graphemes:
     }
 }
 
+#[cfg(windows)]
+fn ghostty_line_from_cells(
+    cells: &mut crate::ghostty::RowCellIter<'_>,
+) -> Result<String, crate::ghostty::Error> {
+    let mut line = String::new();
+    while cells.next() {
+        line.push_str(&ghostty_cell_symbol(cells)?);
+    }
+    Ok(line.trim_end().to_string())
+}
+
 fn ghostty_cell_symbol(
     cells: &crate::ghostty::RowCellIter<'_>,
 ) -> Result<String, crate::ghostty::Error> {
