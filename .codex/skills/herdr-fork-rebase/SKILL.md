@@ -16,7 +16,7 @@ upstream. Never merge upstream in; never push to upstream.
 
 Repo: `~/dev/herdr`. Remotes: `upstream` = `ogulcancelik/herdr` (fetch-only —
 its push URL is deliberately set to the invalid `DISABLED_do_not_push_to_upstream`;
-leave it that way), `origin` = `Volpestyle/clanky-herdr` (the fork;
+leave it that way), `origin` = `Volpestyle/clankie-herdr` (the fork;
 force-pushes expected).
 
 - `master` — pristine mirror of `upstream/master`. Never commit to it.
@@ -64,6 +64,9 @@ stack.
 
 Running herdr servers keep the old binary (old inode) until restarted —
 installing is safe while sessions are live; restart to pick up the new build.
+If the new client then reports `protocol_mismatch` against that live server,
+use `~/.local/bin/herdr.bak` for coordination until the deliberate restart;
+never stop the server just to complete this routine.
 
 ## Adding / editing a patch
 
@@ -86,6 +89,10 @@ installing is safe while sessions are live; restart to pick up the new build.
 
 ## Conflict gotchas (learned 2026-07-03, first restack)
 
+- Reproduce unexpected integration-test failures in a clean temporary
+  worktree at `upstream/master` before changing fork code. If they fail there
+  identically, record them as upstream baseline failures and run the rest of
+  the suite excluding only those proven failures.
 - **Test-file conflicts are almost all protocol-version churn.** Upstream
   replaced hardcoded protocol numbers with a `CURRENT_PROTOCOL` constant;
   carried patches touching tests conflict on exactly that line in dozens of
