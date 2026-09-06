@@ -9,6 +9,13 @@ use crate::api::schema::{
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PANE_SHELL_READINESS_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The pane this CLI call was made from, absent outside a Herdr-managed pane.
+fn caller_pane_id() -> Option<String> {
+    std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
         print_agent_help();
@@ -377,6 +384,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                 pane_id: pane_id.clone(),
                 args: agent_args.clone(),
                 timeout_ms,
+                parent_pane_id: caller_pane_id(),
             }),
         })?;
         if response.get("error").is_none() {
@@ -835,6 +843,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
             target: target.clone(),
             text: text.clone(),
             wait: wait.then_some(AgentPromptWaitOptions { until, timeout_ms }),
+            from_pane_id: caller_pane_id(),
         }),
     })?;
     super::print_response(&response)

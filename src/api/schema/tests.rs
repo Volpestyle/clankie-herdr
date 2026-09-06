@@ -99,6 +99,7 @@ fn agent_start_and_prompt_requests_round_trip() {
             pane_id: "w1:p2".into(),
             args: vec!["--no-session".into()],
             timeout_ms: Some(30_000),
+            parent_pane_id: None,
         }),
     };
     let start_json = serde_json::to_value(&start).unwrap();
@@ -115,6 +116,7 @@ fn agent_start_and_prompt_requests_round_trip() {
             target: "reviewer".into(),
             text: "review this".into(),
             wait: None,
+            from_pane_id: None,
         }),
     };
     let prompt_json = serde_json::to_value(&prompt).unwrap();
@@ -133,6 +135,7 @@ fn agent_start_and_prompt_requests_round_trip() {
                 until: vec![AgentStatus::Idle, AgentStatus::Done],
                 timeout_ms: Some(120_000),
             }),
+            from_pane_id: None,
         }),
     };
     let prompt_and_wait_json = serde_json::to_value(&prompt_and_wait).unwrap();
@@ -148,6 +151,120 @@ fn agent_start_and_prompt_requests_round_trip() {
         serde_json::from_value::<Request>(prompt_and_wait_json).unwrap(),
         prompt_and_wait
     );
+}
+
+#[test]
+fn agent_edge_params_carry_the_calling_pane() {
+    let start = Request {
+        id: "start".into(),
+        method: Method::AgentStart(AgentStartParams {
+            name: "reviewer".into(),
+            kind: "pi".into(),
+            pane_id: "w1:p2".into(),
+            args: Vec::new(),
+            timeout_ms: None,
+            parent_pane_id: Some("w1:p1".into()),
+        }),
+    };
+    let start_json = serde_json::to_value(&start).unwrap();
+    assert_eq!(start_json["params"]["parent_pane_id"], "w1:p1");
+    assert_eq!(
+        serde_json::from_value::<Request>(start_json).unwrap(),
+        start
+    );
+
+    let prompt = Request {
+        id: "prompt".into(),
+        method: Method::AgentPrompt(AgentPromptParams {
+            target: "reviewer".into(),
+            text: "review this".into(),
+            wait: None,
+            from_pane_id: Some("w1:p1".into()),
+        }),
+    };
+    let prompt_json = serde_json::to_value(&prompt).unwrap();
+    assert_eq!(prompt_json["params"]["from_pane_id"], "w1:p1");
+    assert_eq!(
+        serde_json::from_value::<Request>(prompt_json).unwrap(),
+        prompt
+    );
+
+    // A caller outside a Herdr pane omits the field rather than guessing one.
+    let anonymous = serde_json::json!({
+        "id": "prompt",
+        "method": "agent.prompt",
+        "params": {"target": "reviewer", "text": "review this"},
+    });
+    let Method::AgentPrompt(params) = serde_json::from_value::<Request>(anonymous).unwrap().method
+    else {
+        panic!("expected agent.prompt");
+    };
+    assert_eq!(params.from_pane_id, None);
+}
+
+#[test]
+fn agent_edge_events_round_trip() {
+    let subscription = Request {
+        id: "sub_agent_edges".into(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: vec![
+                Subscription::AgentPrompted {},
+                Subscription::AgentSpawned {},
+            ],
+        }),
+    };
+    let json = serde_json::to_string(&subscription).unwrap();
+    assert!(json.contains("\"type\":\"agent.prompted\""));
+    assert!(json.contains("\"type\":\"agent.spawned\""));
+    assert_eq!(
+        serde_json::from_str::<Request>(&json).unwrap(),
+        subscription
+    );
+
+    for event in [
+        EventEnvelope {
+            event: EventKind::AgentPrompted,
+            data: EventData::AgentPrompted {
+                from_pane_id: Some("w1:p1".into()),
+                to_pane_id: "w1:p2".into(),
+                timestamp_ms: 1_757_200_000_000,
+            },
+        },
+        EventEnvelope {
+            event: EventKind::AgentPrompted,
+            data: EventData::AgentPrompted {
+                from_pane_id: None,
+                to_pane_id: "w1:p2".into(),
+                timestamp_ms: 1_757_200_000_000,
+            },
+        },
+        EventEnvelope {
+            event: EventKind::AgentSpawned,
+            data: EventData::AgentSpawned {
+                parent_pane_id: Some("w1:p1".into()),
+                child_pane_id: "w1:p2".into(),
+                timestamp_ms: 1_757_200_000_000,
+            },
+        },
+    ] {
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, event);
+    }
+
+    let json = serde_json::to_value(&EventEnvelope {
+        event: EventKind::AgentSpawned,
+        data: EventData::AgentSpawned {
+            parent_pane_id: None,
+            child_pane_id: "w1:p2".into(),
+            timestamp_ms: 1_757_200_000_000,
+        },
+    })
+    .unwrap();
+    assert_eq!(json["event"], "agent_spawned");
+    assert_eq!(json["data"]["type"], "agent_spawned");
+    assert_eq!(json["data"]["child_pane_id"], "w1:p2");
+    assert!(json["data"].get("parent_pane_id").is_none());
 }
 
 #[test]

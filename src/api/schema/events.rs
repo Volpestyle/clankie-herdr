@@ -62,6 +62,10 @@ pub enum Subscription {
     PaneExited {},
     #[serde(rename = "pane.agent_detected")]
     PaneAgentDetected {},
+    #[serde(rename = "agent.prompted")]
+    AgentPrompted {},
+    #[serde(rename = "agent.spawned")]
+    AgentSpawned {},
     #[serde(rename = "pane.output_matched")]
     PaneOutputMatched {
         pane_id: String,
@@ -217,6 +221,8 @@ pub enum EventKind {
     PaneExited,
     PaneAgentDetected,
     PaneAgentStatusChanged,
+    AgentPrompted,
+    AgentSpawned,
     LayoutUpdated,
 }
 
@@ -248,6 +254,8 @@ impl EventKind {
             EventKind::PaneExited => "pane.exited",
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
+            EventKind::AgentPrompted => "agent.prompted",
+            EventKind::AgentSpawned => "agent.spawned",
             EventKind::LayoutUpdated => "layout.updated",
         }
     }
@@ -280,6 +288,8 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneExited,
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
+    EventKind::AgentPrompted,
+    EventKind::AgentSpawned,
     EventKind::LayoutUpdated,
 ];
 
@@ -549,6 +559,18 @@ pub enum EventData {
         display_agent: Option<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         state_labels: HashMap<String, String>,
+    },
+    AgentPrompted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_pane_id: Option<String>,
+        to_pane_id: String,
+        timestamp_ms: u64,
+    },
+    AgentSpawned {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_pane_id: Option<String>,
+        child_pane_id: String,
+        timestamp_ms: u64,
     },
     LayoutUpdated {
         layout: super::panes::PaneLayoutSnapshot,

@@ -6,6 +6,7 @@ use super::plugin_manifest_available;
 use crate::api::schema::{
     InstalledPluginInfo, PluginCommandLogInfo, PluginCommandStatus, PluginInvocationContext,
 };
+use crate::app::api_helpers::current_unix_ms;
 use crate::app::App;
 
 const PLUGIN_COMMAND_OUTPUT_MAX_BYTES: usize = 64 * 1024;
@@ -272,13 +273,6 @@ impl App {
             self.state.plugin_command_logs.drain(0..extra);
         }
     }
-}
-
-fn current_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
 }
 
 pub(super) fn read_capped_plugin_output(mut reader: impl Read, cap: usize) -> String {

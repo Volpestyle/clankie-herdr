@@ -185,6 +185,20 @@ impl App {
                     context.focused_pane_id = Some(pane_id.clone());
                     context
                 }),
+            EventData::AgentPrompted {
+                to_pane_id: pane_id,
+                ..
+            }
+            | EventData::AgentSpawned {
+                child_pane_id: pane_id,
+                ..
+            } => self
+                .plugin_context_for_public_pane_id(pane_id, correlation_id)
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.focused_pane_id = Some(pane_id.clone());
+                    context
+                }),
         }
     }
 

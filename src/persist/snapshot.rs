@@ -573,6 +573,7 @@ mod tests {
             .begin_managed_agent(
                 "reviewer".into(),
                 crate::detect::Agent::Pi,
+                None,
                 now,
                 std::time::Duration::ZERO,
                 std::time::Duration::from_secs(1),
