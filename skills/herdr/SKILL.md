@@ -21,6 +21,8 @@ The CLI resolves its session from `HERDR_SOCKET_PATH` (injected into every manag
 
 For direct Unix-socket integrations, treat `session.snapshot` as a one-shot request: Herdr sends the response and closes that connection. Start `events.subscribe` on a fresh connection and use it only as an event stream; do not send later requests on it. `pane.agent_status_changed` subscriptions require a `pane_id`, so discover the live panes first and keep one status subscription per pane, adding and removing those streams with pane lifecycle events.
 
+Agent-to-agent traffic arrives as two unparameterized subscriptions. `agent.prompted` carries `from_pane_id` (absent when the caller was outside a pane), `to_pane_id`, and `timestamp_ms`. `agent.spawned` carries `parent_pane_id` (same rule), `child_pane_id`, and `timestamp_ms`. Claude Code's own session-to-session messages and subagents never reach Herdr, so they never appear here.
+
 ## Learn the current CLI
 
 The installed binary is the authority for command syntax. Start with:
@@ -61,6 +63,8 @@ A pane exists whether or not it contains an agent. `agent start` requires an exi
 Agent commands accept either a unique live agent name or the pane ID currently hosting that agent. They do not accept terminal IDs or bare agent-kind labels. Names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live agents. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced.
 
 `agent list` exposes that operator-assigned identity as `.name`; an ad-hoc recognized agent can omit it. Do not substitute `.agent_session` for the name: the session tuple identifies the harness-native session and can rotate while a named managed agent remains the same logical subject.
+
+`agent get` and `agent list` also expose `.parent_pane_id`: the pane that ran `agent start` for this agent, when that call came from inside a Herdr pane. It follows the managed agent's lifetime and is cleared with the name, so reading it rebuilds the current spawn tree without replaying events. It is absent for an agent started from outside Herdr and for one Herdr merely recognized.
 
 `idle` and `done` both mean the agent is ready for input. The CLI/API uses the server's seen state to distinguish them; explicit focus commands mark the target seen, while reads do not. Each TUI client tracks viewed completions independently, so its Done badge can differ from the CLI or another client's badge. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify it confidently; it does not prove completion.
 
@@ -135,6 +139,8 @@ Submit work through the agent surface:
 ```bash
 herdr agent prompt reviewer "Review the current diff and report only actionable findings." --wait --timeout 120000
 ```
+
+`agent prompt` and `agent start` stamp the calling pane from `HERDR_PANE_ID`, as `from_pane_id` on the prompt and `parent_pane_id` on the start. A call from outside a Herdr pane simply omits it; the sender is never guessed.
 
 `agent prompt` honors the pane's live bracketed-paste mode and sends text followed by encoded Enter as one ordered submission. It reports successful submission only after both have been written; that alone does not prove the agent started a turn. The submit delay grows with prompt size for Codex on Windows. It rejects an agent already waiting at an approval or question dialog with `agent_blocked` before sending any input. Inspect the blocked UI and ask the user before answering it. For normal agent work, `--wait` is enough: it waits for the first settled `idle`, `done`, or `blocked` state. Do not repeat those defaults with `--until`.
 

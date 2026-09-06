@@ -68,6 +68,14 @@ impl App {
             Err(err) => return encode_error_body(id, self.agent_start_error_body(err)),
         };
 
+        self.emit_event(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::AgentSpawned,
+            data: crate::api::schema::EventData::AgentSpawned {
+                parent_pane_id: agent.parent_pane_id.clone(),
+                child_pane_id: agent.pane_id.clone(),
+                timestamp_ms: crate::app::api_helpers::current_unix_ms(),
+            },
+        });
         encode_success(id, ResponseResult::AgentStarted { agent, argv })
     }
 
@@ -197,6 +205,14 @@ impl App {
                 submit_deadline,
             )
             .map_err(|err| encode_error(id.clone(), "agent_prompt_failed", err.to_string()))?;
+        self.emit_event(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::AgentPrompted,
+            data: crate::api::schema::EventData::AgentPrompted {
+                from_pane_id: params.from_pane_id.clone(),
+                to_pane_id: agent.pane_id.clone(),
+                timestamp_ms: crate::app::api_helpers::current_unix_ms(),
+            },
+        });
         Ok((id, agent, completion))
     }
 
@@ -463,6 +479,7 @@ mod tests {
                 target: public_pane_id,
                 text: "A != B".into(),
                 wait: None,
+                from_pane_id: None,
             },
         );
         assert!(response_rx.try_recv().is_err());
@@ -492,6 +509,7 @@ mod tests {
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,
+                from_pane_id: None,
             },
         );
         let raw: SuccessResponse = serde_json::from_str(&raw).unwrap();
@@ -507,6 +525,7 @@ mod tests {
                 target: "opencode".into(),
                 text: "wrong target".into(),
                 wait: None,
+                from_pane_id: None,
             },
         );
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&rejected).unwrap();
@@ -534,6 +553,7 @@ mod tests {
                 target: "reviewer".into(),
                 text: "unrelated prompt".into(),
                 wait: None,
+                from_pane_id: None,
             },
         );
 
@@ -574,6 +594,7 @@ mod tests {
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,
+                from_pane_id: None,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -638,6 +659,7 @@ mod tests {
         terminal.begin_managed_agent(
             "reviewer".into(),
             Agent::OpenCode,
+            None,
             now,
             std::time::Duration::from_secs(3),
             std::time::Duration::from_secs(10),
@@ -653,11 +675,149 @@ mod tests {
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,
+                from_pane_id: None,
             },
         );
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "agent_not_ready");
         assert!(rx.try_recv().is_err());
+    }
+
+    fn edge_events(app: &App) -> Vec<crate::api::schema::EventData> {
+        app.event_hub
+            .events_after(0)
+            .into_iter()
+            .map(|(_, event)| event.data)
+            .filter(|data| {
+                matches!(
+                    data,
+                    crate::api::schema::EventData::AgentPrompted { .. }
+                        | crate::api::schema::EventData::AgentSpawned { .. }
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_emits_a_prompt_edge_from_the_calling_pane() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Working);
+        let (runtime, _rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 4,
+            );
+        app.state.insert_test_runtime(pane_id, runtime);
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+
+        app.handle_agent_prompt(
+            "req".into(),
+            AgentPromptParams {
+                target: public_pane_id.clone(),
+                text: "review this".into(),
+                wait: None,
+                from_pane_id: Some("w9:p9".into()),
+            },
+        );
+        // A caller outside a Herdr pane leaves the sender absent.
+        app.handle_agent_prompt(
+            "req".into(),
+            AgentPromptParams {
+                target: public_pane_id.clone(),
+                text: "review that".into(),
+                wait: None,
+                from_pane_id: None,
+            },
+        );
+
+        assert_eq!(
+            edge_events(&app),
+            vec![
+                crate::api::schema::EventData::AgentPrompted {
+                    from_pane_id: Some("w9:p9".into()),
+                    to_pane_id: public_pane_id.clone(),
+                    timestamp_ms: edge_timestamp(&app, 0),
+                },
+                crate::api::schema::EventData::AgentPrompted {
+                    from_pane_id: None,
+                    to_pane_id: public_pane_id,
+                    timestamp_ms: edge_timestamp(&app, 1),
+                },
+            ]
+        );
+    }
+
+    fn edge_timestamp(app: &App, index: usize) -> u64 {
+        match &edge_events(app)[index] {
+            crate::api::schema::EventData::AgentPrompted { timestamp_ms, .. }
+            | crate::api::schema::EventData::AgentSpawned { timestamp_ms, .. } => *timestamp_ms,
+            other => panic!("expected an edge event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_start_records_the_parent_pane_and_emits_a_spawn_edge() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let (runtime, _rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 4);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = app.handle_agent_start(
+            "req".into(),
+            AgentStartParams {
+                name: "worker".into(),
+                kind: "pi".into(),
+                pane_id: public_pane_id.clone(),
+                args: Vec::new(),
+                timeout_ms: Some(4_000),
+                parent_pane_id: Some("w9:p9".into()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentStarted { agent, .. } = success.result else {
+            panic!("expected started response");
+        };
+        assert_eq!(agent.parent_pane_id.as_deref(), Some("w9:p9"));
+
+        assert_eq!(
+            edge_events(&app),
+            vec![crate::api::schema::EventData::AgentSpawned {
+                parent_pane_id: Some("w9:p9".into()),
+                child_pane_id: public_pane_id.clone(),
+                timestamp_ms: edge_timestamp(&app, 0),
+            }]
+        );
+
+        // The parent is readable on the child through agent get, and is cleared
+        // with the rest of the managed agent identity when it goes away.
+        let response = app.handle_agent_get(
+            "req".into(),
+            AgentTarget {
+                target: "worker".into(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info");
+        };
+        assert_eq!(agent.parent_pane_id.as_deref(), Some("w9:p9"));
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .clear_agent_name();
+        assert_eq!(app.state.terminals[&terminal_id].agent_parent_pane_id, None);
     }
 
     #[test]

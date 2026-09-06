@@ -173,6 +173,9 @@ pub struct AgentStartParams {
     /// Startup timeout in milliseconds. Values must be greater than 3000 and at most 300000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Pane the caller is running in, absent when the caller is outside Herdr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pane_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -181,6 +184,9 @@ pub struct AgentPromptParams {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<AgentPromptWaitOptions>,
+    /// Pane the caller is running in, absent when the caller is outside Herdr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_pane_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -211,6 +217,9 @@ pub struct AgentInfo {
     pub workspace_id: String,
     pub tab_id: String,
     pub pane_id: String,
+    /// Pane that ran `agent start` for this agent, when it was started from inside Herdr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pane_id: Option<String>,
     pub focused: bool,
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub launch_pending: bool,

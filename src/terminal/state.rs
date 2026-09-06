@@ -131,6 +131,9 @@ pub struct TerminalState {
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
+    /// Pane that ran `agent start` for the current managed agent, when it was
+    /// started from inside Herdr. Follows the managed agent's lifetime.
+    pub agent_parent_pane_id: Option<String>,
     agent_name_owner: Option<AgentNameOwner>,
     managed_agent: Option<ManagedAgent>,
     managed_agent_launch_session: Option<crate::agent_resume::PersistedAgentSession>,
@@ -166,6 +169,7 @@ impl TerminalState {
             terminal_title: None,
             manual_label: None,
             agent_name: None,
+            agent_parent_pane_id: None,
             agent_name_owner: None,
             managed_agent: None,
             managed_agent_launch_session: None,
@@ -1911,11 +1915,13 @@ impl TerminalState {
         &mut self,
         name: String,
         kind: Agent,
+        parent_pane_id: Option<String>,
         now: Instant,
         settle_delay: Duration,
         timeout: Duration,
     ) {
         self.set_agent_name(name);
+        self.agent_parent_pane_id = parent_pane_id;
         self.agent_name_owner = Some(AgentNameOwner {
             agent_label: crate::detect::agent_label(kind).to_string(),
             session_ref: None,
@@ -2046,6 +2052,8 @@ impl TerminalState {
 
     pub fn restore_managed_agent(&mut self, name: String, kind: Agent) {
         self.set_agent_name(name);
+        // The spawning pane is not persisted, so a restored agent has no parent.
+        self.agent_parent_pane_id = None;
         self.agent_name_owner = Some(AgentNameOwner {
             agent_label: crate::detect::agent_label(kind).to_string(),
             session_ref: None,
@@ -2066,6 +2074,7 @@ impl TerminalState {
             self.persisted_agent_session = None;
         }
         self.agent_name = None;
+        self.agent_parent_pane_id = None;
         self.agent_name_owner = None;
         self.managed_agent = None;
     }
@@ -2233,6 +2242,7 @@ mod tests {
         terminal.begin_managed_agent(
             "reviewer".into(),
             Agent::Pi,
+            None,
             now,
             Duration::from_millis(100),
             Duration::from_secs(1),
@@ -2276,6 +2286,7 @@ mod tests {
         mismatch.begin_managed_agent(
             "reviewer".into(),
             Agent::Pi,
+            None,
             now,
             Duration::ZERO,
             Duration::from_secs(1),
@@ -2289,6 +2300,7 @@ mod tests {
         timed_out.begin_managed_agent(
             "reviewer".into(),
             Agent::Pi,
+            None,
             now,
             Duration::from_millis(10),
             Duration::from_millis(20),
@@ -5010,6 +5022,7 @@ mod tests {
         terminal.begin_managed_agent(
             "reviewer".into(),
             Agent::OpenCode,
+            None,
             now,
             Duration::ZERO,
             Duration::from_secs(1),
