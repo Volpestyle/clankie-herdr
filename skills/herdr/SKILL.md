@@ -139,7 +139,7 @@ herdr agent prompt reviewer "Review the current diff and report only actionable 
 
 `agent prompt` honors the pane's live bracketed-paste mode and sends text followed by encoded Enter after a short delay. It rejects an agent already waiting at an approval or question dialog with `agent_blocked` before sending any input. Inspect the blocked UI and ask the user before answering it. For normal agent work, `--wait` is enough: it waits for the first settled `idle`, `done`, or `blocked` state. Do not repeat those defaults with `--until`.
 
-Before prompting a settled agent, read the pane bottom. Text already sitting after the agent's input marker is an operator draft, not idle output; `agent prompt` can overwrite or combine with that buffer. Preserve it and resolve that instruction deliberately instead of injecting another prompt over it.
+Before prompting a settled agent, read the pane bottom. Claude can show dim autocomplete text after the input marker; use `--format ansi` to distinguish that suggestion from entered text. An entered operator draft must be preserved: `agent prompt` can overwrite or combine with that buffer. Resolve the draft deliberately instead of injecting another prompt over it; do not restore a dim suggestion as though it were lost input.
 
 A prompt sent from a non-working state must produce an observed lifecycle change within five seconds. Otherwise Herdr returns `agent_prompt_stalled` instead of waiting indefinitely. This wait tracks lifecycle state, not an individual turn; if the agent is already working, completion of the active turn may satisfy it.
 
