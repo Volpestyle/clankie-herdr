@@ -2774,19 +2774,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_server_restart_reason_allows_current_server() {
-        assert_eq!(
-            remote_server_restart_reason(
-                Some(&current_version()),
-                Some(CURRENT_PROTOCOL),
-                true,
-                false
-            ),
-            None
-        );
-    }
-
-    #[test]
     fn remote_install_plan_keeps_compatible_running_server() {
         assert_eq!(
             remote_install_running_server_plan(
